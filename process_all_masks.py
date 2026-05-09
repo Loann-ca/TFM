@@ -72,10 +72,6 @@ def process_scan(scan, output_ct_dir, output_mask_dir, clevel):
         return rows
 
     for nod_idx, nod in enumerate(nodules):
-        # Skip nodules annotated by fewer than 3 radiologists (low confidence)
-        if len(nod) < 3:
-            continue
-
         try:
             mask, bbox, _ = consensus(nod, clevel=clevel)
         except Exception as e:
@@ -97,11 +93,11 @@ def process_scan(scan, output_ct_dir, output_mask_dir, clevel):
         np.save(os.path.join(output_ct_dir, fname), ct_patch)
         np.save(os.path.join(output_mask_dir, fname), mask.astype(np.uint8))
 
-        # Average annotation features across radiologists
+        # Average annotation features across radiologists (skip None values)
         features = {}
         for feat in FEATURE_NAMES:
-            values = [getattr(ann, feat) for ann in nod]
-            features[feat] = round(np.mean(values), 2)
+            values = [getattr(ann, feat) for ann in nod if getattr(ann, feat) is not None]
+            features[feat] = round(np.mean(values), 2) if values else None
 
         rows.append(
             {
@@ -134,12 +130,6 @@ def main():
         type=float,
         default=0.5,
         help="Consensus level — fraction of annotators that must agree (default: 0.5)",
-    )
-    parser.add_argument(
-        "--min_annotations",
-        type=int,
-        default=3,
-        help="Minimum number of radiologist annotations to include a nodule (default: 3)",
     )
     args = parser.parse_args()
 
