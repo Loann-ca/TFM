@@ -1,0 +1,1 @@
+pip install pylidc pydicom SimpleITK matplotlib numpy scipy scikit-image
