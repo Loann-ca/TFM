@@ -1,2 +1,31 @@
+# Dataset (large DICOM files)
 /lidc_idri
 /tcia-lidc-xml
+
+# Generated output
+/output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# pylidc config
+.pylidcrc
