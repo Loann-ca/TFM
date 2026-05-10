@@ -12,17 +12,24 @@ Master's thesis project for detecting and classifying lung nodules from CT scans
 
 ```
 TFM/
-├── process_all_masks.py       # Batch script: generates masks for all patients/nodules
+├── process_all_masks.py       # Stage 1: generates masks for all patients/nodules
+├── preprocessing_pipeline.py  # Stage 2: windowing, normalization, padding, split
+├── visualize_nodules.ipynb    # Visualize processed nodules and metadata
 ├── process_data.ipynb         # Exploratory notebook (single patient)
 ├── process_data_test.ipynb    # Exploratory notebook with visualization
 ├── output/                    # Generated data (gitignored)
-│   ├── CT/                    #   CT patches as .npy files
+│   ├── CT/                    #   Raw CT patches as .npy files
 │   ├── masks/                 #   Consensus masks as .npy files
-│   └── metadata.csv           #   Annotation features per nodule
+│   ├── metadata.csv           #   Annotation features per nodule
+│   └── preprocessed/          #   Ready-to-train data
+│       ├── train/             #     CT/, masks/, metadata.csv
+│       ├── val/               #     CT/, masks/, metadata.csv
+│       └── test/              #     CT/, masks/, metadata.csv
 ├── .devcontainer/
 │   └── devcontainer.json
 ├── AGENTS.md
 ├── SKILLS.md
+├── QA.md                      # Histórico de preguntas y respuestas
 └── .gitignore
 ```
 
@@ -74,7 +81,17 @@ configparser.SafeConfigParser = configparser.ConfigParser
 
 - Generated using `pylidc.utils.consensus(annotations, clevel=0.5)`.
 - `clevel=0.5` means a voxel is included if ≥50% of radiologists marked it.
-- Only nodules with ≥3 annotations are processed (configurable via `--min_annotations`).
+- All nodules are included regardless of annotation count; `num_annotations` in the CSV allows filtering later.
+
+### Preprocessing Pipeline
+
+Applied by `preprocessing_pipeline.py` before model training:
+
+1. **Windowing HU** — Clip to [-1000, 600] to focus on lung tissue and nodules while preserving calcification info.
+2. **Normalization** — Scale to [0, 1] after windowing.
+3. **Padding/Crop** — Pad with zeros (air) or center-crop to a fixed size (default 64×64×64).
+4. **Train/val/test split** — 70/15/15 split grouped by patient to prevent data leakage.
+5. **Data augmentation** — Random flips and 90° rotations (applied at training time, not during preprocessing).
 
 ### Annotation Features
 
@@ -100,7 +117,7 @@ Each nodule has these averaged features (1–5 scale unless noted):
 pip install pylidc pydicom SimpleITK matplotlib numpy scipy scikit-image tqdm
 ```
 
-### Generate All Masks
+### Stage 1: Generate All Masks
 
 ```bash
 python process_all_masks.py --output_dir output --clevel 0.5
@@ -110,6 +127,14 @@ This produces:
 - `output/CT/{patient}_nod{i}.npy` — CT patch for each nodule
 - `output/masks/{patient}_nod{i}.npy` — binary consensus mask
 - `output/metadata.csv` — annotation features for classification
+
+### Stage 2: Preprocess for Training
+
+```bash
+python preprocessing_pipeline.py --output_dir output --target_size 64
+```
+
+This produces `output/preprocessed/{train,val,test}/` with windowed, normalized, and padded data ready for the U-Net.
 
 ## Future Work
 

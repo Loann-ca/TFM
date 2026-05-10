@@ -14,7 +14,6 @@
 
 **Parameters:**
 - `--clevel` — Consensus level (default 0.5). Lower values include more voxels, higher values are stricter.
-- `--min_annotations` — Minimum radiologist annotations required (default 3).
 - `--output_dir` — Where to write results (default `output`).
 
 **Recovery:** The CSV is written incrementally. If the script crashes, delete the partial CSV and re-run — `.npy` files are overwritten safely.
@@ -36,7 +35,30 @@
 
 ---
 
-## 3. Load Preprocessed Data for Model Training
+## 3. Run Preprocessing Pipeline
+
+**When to use:** After generating masks with `process_all_masks.py`, before training the U-Net.
+
+**Steps:**
+```bash
+python preprocessing_pipeline.py --output_dir output --target_size 64
+```
+
+**What it does:**
+1. Splits data into train/val/test (70/15/15) grouped by patient
+2. Applies HU windowing [-1000, 600] and normalizes to [0, 1]
+3. Pads or crops all volumes to 64×64×64
+4. Saves preprocessed data in `output/preprocessed/{train,val,test}/`
+
+**Parameters:**
+- `--target_size` — Cube side length in voxels (default 64). Check the size distribution of your nodules to choose.
+- `--hu_min` / `--hu_max` — Windowing range (default -1000 / 600).
+
+**Augmentation** is NOT applied during preprocessing — it should be applied at training time in the DataLoader using `augment_3d()` from the same file.
+
+---
+
+## 4. Load Preprocessed Data for Model Training
 
 **When to use:** You have generated the output and want to load it for training a segmentation or classification model.
 
@@ -60,7 +82,7 @@ print(f"Malignancy: {row.malignancy}, Shape: {ct.shape}")
 
 ---
 
-## 4. Add pylidc Compatibility Shims
+## 5. Add pylidc Compatibility Shims
 
 **When to use:** Any new Python file or notebook that imports `pylidc`.
 
@@ -80,7 +102,7 @@ These shims fix deprecation errors in `pylidc` with numpy ≥1.24 and Python ≥
 
 ---
 
-## 5. Configure pylidc Database Path
+## 6. Configure pylidc Database Path
 
 **When to use:** Setting up a new environment or machine.
 
@@ -99,7 +121,26 @@ These shims fix deprecation errors in `pylidc` with numpy ≥1.24 and Python ≥
 
 ---
 
-## 6. Visualize CT + Mask Overlay
+## 7. Log Questions & Answers
+
+**When to use:** Every time the user asks a conceptual or technical question about the project.
+
+**Steps:**
+1. After answering the question, append the Q&A to `QA.md`.
+2. Use the next sequential number as heading.
+3. Format:
+   ```markdown
+   ## N. <Question>
+
+   **Respuesta:** <Answer>
+   ```
+4. Keep answers concise but complete. Include code snippets if relevant.
+
+**File:** `QA.md` in the project root.
+
+---
+
+## 8. Visualize CT + Mask Overlay
 
 **When to use:** Quick visual check of a nodule segmentation.
 
