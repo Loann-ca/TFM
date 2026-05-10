@@ -141,6 +141,10 @@ def main():
 
     csv_path = os.path.join(args.output_dir, "metadata.csv")
 
+    # Remove previous CSV to avoid duplicates on re-runs
+    if os.path.exists(csv_path):
+        os.remove(csv_path)
+        
     # Query all scans
     scans = pl.query(pl.Scan).all()
     print(f"Found {len(scans)} scans in the database.")

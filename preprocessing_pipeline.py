@@ -223,7 +223,7 @@ def main():
     target_shape = (args.target_size, args.target_size, args.target_size)
 
     # Cargar metadata
-    meta = pd.read_csv(os.path.join(args.output_dir, "metadata.csv"))
+    meta = meta.drop_duplicates(subset=["patient_id", "nodule_idx"]).reset_index(drop=True)
     print(f"Total nódulos: {len(meta)}")
     print(f"Pacientes únicos: {meta.patient_id.nunique()}")
 
