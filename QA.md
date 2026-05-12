@@ -70,3 +70,32 @@ features[feat] = round(np.mean(values), 2) if values else None
 ## 10. ¿Opción A (rango estrecho + padding explícito) u opción B (mantener -1000)?
 
 **Respuesta:** Opción B (mantener -1000). El padding y los valores de la imagen quedan en la misma escala de forma natural — cero significa aire tanto en el padding como en el CT real. Con la opción A habría que gestionar el padding por separado (usar un valor especial como -1), añadiendo complejidad sin ganancia real. La diferencia de contraste entre ambas opciones (~19% más resolución con rango estrecho) es despreciable porque la red tiene de sobra con float32 para distinguir los tejidos.
+
+---
+
+## 11. ¿Cómo visualizar los datos preprocesados?
+
+**Respuesta:** Se creó `visualize_preprocessed.py` que lee los datos de `output/preprocessed/{train,val,test}/` y ofrece varios modos de visualización:
+
+- **Nódulo individual** (slice central con CT, máscara y overlay):
+  ```bash
+  python visualize_preprocessed.py --split train --index 0
+  ```
+- **Todos los slices** de un nódulo:
+  ```bash
+  python visualize_preprocessed.py --split train --index 0 --all_slices
+  ```
+- **Filtrar por paciente**:
+  ```bash
+  python visualize_preprocessed.py --patient LIDC-IDRI-0078
+  ```
+- **Resumen de los 3 splits** (estadísticas + comparación de 8 nódulos + distribución de malignancy):
+  ```bash
+  python visualize_preprocessed.py --summary
+  ```
+
+
+
+
+
+

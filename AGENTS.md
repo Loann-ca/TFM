@@ -4,27 +4,33 @@
 
 Master's thesis project for detecting and classifying lung nodules from CT scans using the LIDC-IDRI dataset. The pipeline has three stages:
 
-1. **Data preprocessing** — Extract consensus masks and CT patches from DICOM data using `pylidc`.
-2. **Segmentation** — U-Net models (2D and 3D) to segment nodules from CT volumes.
+1. **Data generation** — Extract full CT volumes and full-size consensus masks from DICOM data using `pylidc`.
+2. **Segmentation** — U-Net 3D to detect and segment nodules from complete CT volumes.
 3. **Classification** — CNN to predict malignancy and other annotation features from segmented nodules.
 
 ## Repository Structure
 
 ```
 TFM/
-├── process_all_masks.py       # Stage 1: generates masks for all patients/nodules
-├── preprocessing_pipeline.py  # Stage 2: windowing, normalization, padding, split
-├── visualize_nodules.ipynb    # Visualize processed nodules and metadata
+├── process_all_masks.py       # Stage 1: full CT volumes + full-size masks per patient
+├── preprocessing_pipeline.py  # Stage 2: windowing, normalization, split by patient
+├── dataset.py                 # PyTorch Dataset with random patch extraction
+├── unet3d.py                 # U-Net 3D architecture
+├── train_unet3d.py            # Training script with Dice+BCE loss
+├── visualize_preprocessed.ipynb # Visualize full CT volumes and masks
+├── visualize_data.ipynb       # Visualize raw data
 ├── process_data.ipynb         # Exploratory notebook (single patient)
 ├── process_data_test.ipynb    # Exploratory notebook with visualization
 ├── output/                    # Generated data (gitignored)
-│   ├── CT/                    #   Raw CT patches as .npy files
-│   ├── masks/                 #   Consensus masks as .npy files
+│   ├── CT/                    #   Full CT volumes per patient (.npy)
+│   ├── masks/                 #   Full-size masks per patient (.npy)
 │   ├── metadata.csv           #   Annotation features per nodule
-│   └── preprocessed/          #   Ready-to-train data
+│   └── preprocessed/          #   Windowed + normalized volumes
 │       ├── train/             #     CT/, masks/, metadata.csv
 │       ├── val/               #     CT/, masks/, metadata.csv
 │       └── test/              #     CT/, masks/, metadata.csv
+│   └── models/                #   Trained model checkpoints
+│       └── unet3d_best.pth
 ├── .devcontainer/
 │   └── devcontainer.json
 ├── AGENTS.md
@@ -56,6 +62,8 @@ TFM/
 | `scikit-image` | Image processing utilities |
 | `matplotlib` | Visualization |
 | `tqdm` | Progress bars |
+| `torch` | Deep learning framework (U-Net 3D, DataLoader) |
+| `scikit-learn` | Train/val/test split (GroupShuffleSplit) |
 
 ## Conventions
 
@@ -73,15 +81,17 @@ configparser.SafeConfigParser = configparser.ConfigParser
 
 ### Naming
 
-- Output files: `{patient_id}_nod{nodule_index}.npy` (e.g., `LIDC-IDRI-0078_nod0.npy`)
+- CT volumes: `{patient_id}.npy` (e.g., `LIDC-IDRI-0078.npy`) — one file per patient
+- Masks: same name, full-size binary mask with all nodules marked
 - Masks are saved as `uint8` (0/1 binary).
-- CT patches are saved as raw HU values (float).
+- CT volumes are saved as raw HU values (float32).
 
 ### Consensus Masks
 
 - Generated using `pylidc.utils.consensus(annotations, clevel=0.5)`.
 - `clevel=0.5` means a voxel is included if ≥50% of radiologists marked it.
 - All nodules are included regardless of annotation count; `num_annotations` in the CSV allows filtering later.
+- Each nodule mask is inserted into a full-size mask (same shape as CT volume) at its bounding box position.
 
 ### Preprocessing Pipeline
 
@@ -89,9 +99,12 @@ Applied by `preprocessing_pipeline.py` before model training:
 
 1. **Windowing HU** — Clip to [-1000, 600] to focus on lung tissue and nodules while preserving calcification info.
 2. **Normalization** — Scale to [0, 1] after windowing.
-3. **Padding/Crop** — Pad with zeros (air) or center-crop to a fixed size (default 64×64×64).
-4. **Train/val/test split** — 70/15/15 split grouped by patient to prevent data leakage.
-5. **Data augmentation** — Random flips and 90° rotations (applied at training time, not during preprocessing).
+3. **Train/val/test split** — 70/15/15 split grouped by patient to prevent data leakage.
+
+Patch extraction and augmentation happen at training time in the DataLoader (dataset.py):
+
+4. **Patch extraction** — Random 64×64×64 patches from full volumes. 50% centered on a nodule, 50% random (balanced sampling).
+5. **Data augmentation** — Random flips and 90° rotations (applied at training time only).
 
 ### Annotation Features
 
@@ -114,32 +127,49 @@ Each nodule has these averaged features (1–5 scale unless noted):
 ### Prerequisites
 
 ```bash
-pip install pylidc pydicom SimpleITK matplotlib numpy scipy scikit-image tqdm
+pip install pylidc pydicom SimpleITK matplotlib numpy scipy scikit-image tqdm torch scikit-learn
 ```
 
-### Stage 1: Generate All Masks
+### Stage 1: Generate Full Volumes and Masks
 
 ```bash
 python process_all_masks.py --output_dir output --clevel 0.5
 ```
 
 This produces:
-- `output/CT/{patient}_nod{i}.npy` — CT patch for each nodule
-- `output/masks/{patient}_nod{i}.npy` — binary consensus mask
-- `output/metadata.csv` — annotation features for classification
+- `output/CT/{patient_id}.npy` — full CT volume per patient
+- `output/masks/{patient_id}.npy` — full-size binary mask (all nodules)
+- `output/metadata.csv` — annotation features per nodule
 
 ### Stage 2: Preprocess for Training
 
 ```bash
-python preprocessing_pipeline.py --output_dir output --target_size 64
+python preprocessing_pipeline.py --output_dir output
 ```
 
-This produces `output/preprocessed/{train,val,test}/` with windowed, normalized, and padded data ready for the U-Net.
+This produces `output/preprocessed/{train,val,test}/` with windowed and normalized full volumes.
+
+### Stage 3: Train U-Net 3D
+
+```bash
+python train_unet3d.py --output_dir output --epochs 50 --batch_size 4 --lr 1e-3
+```
+
+This trains the U-Net 3D and saves:
+- `output/models/unet3d_best.pth` — best model checkpoint (by validation Dice)
+- `output/models/training_history.npz` — loss and Dice curves per epoch
+
+### U-Net 3D Architecture
+
+- **Encoder**: 1 → 32 → 64 → 128 → 256 channels, MaxPool3d between levels
+- **Decoder**: 256 → 128 → 64 → 32 channels, ConvTranspose3d + skip connections
+- **Loss**: Dice Loss + BCE (weighted 0.5) for stable training
+- **Optimizer**: Adam with ReduceLROnPlateau scheduler
+- **Early stopping**: patience=10 epochs on validation Dice
+- **Augmentation**: random flips + 90° rotations applied at training time in the DataLoader
 
 ## Future Work
 
-- [ ] U-Net 3D segmentation model
 - [ ] U-Net 2D segmentation model (slice-by-slice)
 - [ ] CNN classification model for malignancy prediction
-- [ ] Data augmentation pipeline
-- [ ] Train/validation/test split strategy
+- [ ] Training curves visualization notebook
