@@ -79,10 +79,33 @@ def process_scan(scan, output_ct_dir, output_mask_dir, clevel):
             print(f"  Consensus failed for {patient_id} nodule {nod_idx}: {e}")
             continue
 
+        # Recortar bbox para que no se salga del volumen
+        slices = []
+        mask_slices = []
+        skip = False
+        for dim in range(3):
+            b = bbox[dim]
+            start = max(b.start, 0)
+            stop = min(b.stop, vol.shape[dim])
+            if stop <= start:
+                print(f"  BBox fuera de rango para {patient_id} nodule {nod_idx} dim {dim}. Skipping.")
+                skip = True
+                break
+            # Ajustar la máscara si se recortó el bbox
+            mask_start = start - b.start
+            mask_stop = mask.shape[dim] - (b.stop - stop)
+            slices.append(slice(start, stop))
+            mask_slices.append(slice(mask_start, mask_stop))
+
+        if skip:
+            continue
+
+        mask_cropped = mask[mask_slices[0], mask_slices[1], mask_slices[2]].astype(np.uint8)
+
         # Insertar la máscara del nódulo en su posición dentro del volumen completo
-        full_mask[bbox[0], bbox[1], bbox[2]] = np.maximum(
-            full_mask[bbox[0], bbox[1], bbox[2]],
-            mask.astype(np.uint8),
+        full_mask[slices[0], slices[1], slices[2]] = np.maximum(
+            full_mask[slices[0], slices[1], slices[2]],
+            mask_cropped,
         )
 
         # Features promediadas por nódulo
