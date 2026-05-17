@@ -20,6 +20,7 @@ import argparse
 import os
 import shutil
 import warnings
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -39,6 +40,42 @@ def apply_windowing(ct, hu_min=-1000, hu_max=600):
     ct = np.clip(ct, hu_min, hu_max)
     ct = (ct - hu_min) / (hu_max - hu_min)
     return ct.astype(np.float32)
+
+
+def _check_free_space(required_bytes, path_for_disk):
+    """Raises OSError if there is not enough free disk space."""
+    free_bytes = shutil.disk_usage(path_for_disk).free
+    if free_bytes < required_bytes:
+        req_mb = required_bytes / (1024 ** 2)
+        free_mb = free_bytes / (1024 ** 2)
+        raise OSError(
+            f"Insufficient disk space. Required ~{req_mb:.1f} MB, available ~{free_mb:.1f} MB "
+            f"on disk containing: {path_for_disk}"
+        )
+
+
+def _safe_save_npy(file_path, arr):
+    """Atomically saves an array as .npy to avoid partial/corrupt files."""
+    out_dir = os.path.dirname(file_path)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Roughly estimate required bytes: data bytes + .npy header overhead.
+    required_bytes = int(arr.nbytes + 1024 * 1024)
+    _check_free_space(required_bytes, out_dir)
+
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".__tmp_", suffix=".npy", dir=out_dir)
+    os.close(tmp_fd)
+
+    try:
+        np.save(tmp_path, arr)
+        os.replace(tmp_path, file_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 # ──────────────────────────────────────────────
@@ -106,9 +143,9 @@ def process_split(meta_split, split_name, output_dir, hu_min, hu_max):
         # Aplicar windowing + normalización
         ct = apply_windowing(ct, hu_min, hu_max)
 
-        # Guardar volumen preprocesado
-        np.save(os.path.join(save_dir, "CT", f"{patient_id}.npy"), ct)
-        np.save(os.path.join(save_dir, "masks", f"{patient_id}.npy"), mask)
+        # Guardar volumen preprocesado con escritura atómica.
+        _safe_save_npy(os.path.join(save_dir, "CT", f"{patient_id}.npy"), ct)
+        _safe_save_npy(os.path.join(save_dir, "masks", f"{patient_id}.npy"), mask)
         processed += 1
 
     # Guardar metadata del split

@@ -94,6 +94,139 @@ features[feat] = round(np.mean(values), 2) if values else None
   python visualize_preprocessed.py --summary
   ```
 
+---
+
+## 12. En `train_unet3d_baseline.py`, ¿qué hace `__getitem__` y dónde se utiliza?
+
+**Respuesta:** `__getitem__` construye una muestra individual del dataset: carga CT y máscara, recorta el patch 3D alrededor del centro, binariza máscara, aplica augmentación opcional, reordena ejes y devuelve tensores (`image`, `mask`). No se llama manualmente: lo invoca automáticamente `DataLoader` durante `for batch in loader` dentro de `run_epoch`.
+
+---
+
+## 13. ¿Qué son los patches del "punto 1" y del "punto 3"?
+
+**Respuesta:**
+
+- Punto 1: patches planificados (metadatos). En `self.items` se guardan rutas y centros, pero no los voxels.
+- Punto 3: patch real recortado. Ocurre en `__getitem__`, donde se extrae el cubo desde el volumen usando el centro.
+
+---
+
+## 14. ¿Cómo calcula el centro de los patches aleatorios?
+
+**Respuesta:** Se muestrea uniforme dentro de límites válidos para que el patch no se salga del volumen:
+
+- `half = patch_size // 2`
+- `cx ~ randint(half, max_x + 1)`
+- `cy ~ randint(half, max_y + 1)`
+- `cz ~ randint(half, max_z + 1)`
+
+No usa la máscara para evitar nódulos; pueden caer sobre nódulo por casualidad.
+
+---
+
+## 15. ¿Cuál es el tamaño del patch? ¿En la lista solo se guardan rutas y centros?
+
+**Respuesta:** El tamaño es global (`patch_size`), por defecto 64, así que cada patch es `64x64x64`. En `self.items` solo se guardan rutas, `patient_id` y centro `(cx, cy, cz)`. El contenido del patch se recorta al vuelo en `__getitem__`.
+
+---
+
+## 16. ¿Cuándo entran en juego DataLoader y `__getitem__`?
+
+**Respuesta:**
+
+1. Se crea el dataset (`FullVolumeNoduleDataset`) y se planifican muestras.
+2. Se crea el `DataLoader`.
+3. En entrenamiento/evaluación, al iterar `for batch in loader`, el `DataLoader` llama a `__getitem__` para cada índice del batch.
+
+---
+
+## 17. ¿En un epoch hay varios batches? ¿Cada batch son patches aleatorios?
+
+**Respuesta:** Sí, un epoch contiene muchos batches. Cada batch tiene `batch_size` patches. En este script los centros aleatorios se generan al construir el dataset (no se re-muestrean cada epoch); lo que sí cambia en train es la augmentación aleatoria.
+
+---
+
+## 18. ¿1206 eran patches o batches?
+
+**Respuesta:** En el ejemplo con 603 pacientes, `patches_per_patient=8` y `batch_size=4`:
+
+- Patches por epoch: `603 * 8 = 4824`
+- Batches por epoch: `4824 / 4 = 1206`
+
+Por tanto, 1206 son batches.
+
+---
+
+## 19. ¿Qué es un batch?
+
+**Respuesta:** Un batch es un grupo de muestras procesadas juntas en una iteración. Aquí, una muestra es un patch 3D (`image`, `mask`), y `batch_size` indica cuántos patches se usan a la vez para calcular la loss y actualizar pesos.
+
+---
+
+## 20. ¿Por qué extrae patches si se entrena con CT completo?
+
+**Respuesta:** Se parte de volúmenes CT completos por paciente, pero el modelo entrena con subvolúmenes (patches) para que el coste en memoria/cómputo sea viable y para balancear mejor nódulo/fondo.
+
+---
+
+## 21. ¿En predicción se pasa CT completo o patches?
+
+**Respuesta:** Conceptualmente se predice sobre CT completo. En práctica, suele hacerse por ventanas (patches) y luego se reconstruye la máscara full-size, normalmente con ventana deslizante (sliding window) y fusión en zonas solapadas.
+
+---
+
+## 22. ¿El muestreo de este script es sliding window o aleatorio?
+
+**Respuesta:** Es muestreo de patches al vuelo con centros positivos (bbox) + centros aleatorios. No es sliding window sistemático.
+
+---
+
+## 23. ¿Qué es un canal y por qué `DoubleConv3D(in_channels, base_channels)`?
+
+**Respuesta:** Un canal es un mapa de características. `in_channels` es cuántos canales entran al bloque y `base_channels` cuántos salen. En CT se suele entrar con 1 canal (intensidad HU) y salir con más canales para aprender distintos patrones.
+
+---
+
+## 24. ¿Por qué CT en HU tiene 1 canal y por qué salida inicial 16 canales?
+
+**Respuesta:** El CT en HU es una magnitud escalar por voxel, por eso 1 canal. El valor 16 es un hiperparámetro típico de compromiso entre capacidad representacional y consumo de memoria en 3D.
+
+---
+
+## 25. ¿Por qué los canales se multiplican por 2 (2, 4, 8...)?
+
+**Respuesta:** Es una convención de U-Net: al bajar resolución espacial, se aumenta capacidad en canales para mantener información semántica. No es obligatorio; puede ajustarse según memoria y rendimiento.
+
+---
+
+## 26. ¿Qué hace `MaxPool3d`?
+
+**Respuesta:** Hace downsampling 3D tomando máximos locales. Con `kernel_size=2` (y `stride=2` implícito) reduce `D/H/W` a la mitad y mantiene canales. Reduce coste y amplía campo receptivo efectivo.
+
+---
+
+## 27. ¿Qué es la B en `[B, C, D, H, W]`?
+
+**Respuesta:** `B` es el batch size: número de muestras (patches) procesadas simultáneamente.
+
+---
+
+## 28. ¿Qué hace exactamente `forward` y cuándo se usa?
+
+**Respuesta:** `forward` define el recorrido de datos por la red (encoder, bottleneck, decoder, salida). Se ejecuta cada vez que se llama `model(x)`, tanto en train como en validación/test.
+
+---
+
+## 29. ¿Por qué encoder baja resolución y sube canales, y decoder hace lo contrario?
+
+**Respuesta:** Encoder prioriza contexto semántico global (más abstracto, menos resolución). Decoder recupera detalle espacial para segmentar voxel a voxel (más resolución, menos compresión en canales).
+
+---
+
+## 30. ¿Qué significa concatenar skips del encoder para recuperar detalle fino?
+
+**Respuesta:** Al hacer pooling se pierde precisión espacial. Las conexiones skip llevan features de alta resolución del encoder al decoder (`cat([d*, e*])`) para combinar contexto profundo con bordes/localización fina y mejorar la máscara final.
+
 
 
 

@@ -14,10 +14,8 @@ Master's thesis project for detecting and classifying lung nodules from CT scans
 TFM/
 ├── process_all_masks.py       # Stage 1: full CT volumes + full-size masks per patient
 ├── preprocessing_pipeline.py  # Stage 2: windowing, normalization, split by patient
-├── dataset.py                 # PyTorch Dataset with random patch extraction
-├── unet3d.py                 # U-Net 3D architecture
-├── train_unet3d.py            # Training script with Dice+BCE loss
-├── visualize_preprocessed.ipynb # Visualize full CT volumes and masks
+├── train_unet3d_baseline.py   # Stage 3: Dataset (patch extraction), U-Net 3D, training loop
+├── visualize_preprocessed_data.ipynb # Visualize full CT volumes and masks
 ├── visualize_data.ipynb       # Visualize raw data
 ├── process_data.ipynb         # Exploratory notebook (single patient)
 ├── process_data_test.ipynb    # Exploratory notebook with visualization
@@ -29,8 +27,12 @@ TFM/
 │       ├── train/             #     CT/, masks/, metadata.csv
 │       ├── val/               #     CT/, masks/, metadata.csv
 │       └── test/              #     CT/, masks/, metadata.csv
-│   └── models/                #   Trained model checkpoints
-│       └── unet3d_best.pth
+├── checkpoints/               #   Trained model checkpoints
+│   └── unet3d_baseline/
+│       ├── best.pt
+│       ├── last.pt
+│       ├── history.csv
+│       └── summary.json
 ├── .devcontainer/
 │   └── devcontainer.json
 ├── AGENTS.md
@@ -152,21 +154,26 @@ This produces `output/preprocessed/{train,val,test}/` with windowed and normaliz
 ### Stage 3: Train U-Net 3D
 
 ```bash
-python train_unet3d.py --output_dir output --epochs 50 --batch_size 4 --lr 1e-3
+python train_unet3d_baseline.py --output_dir output --epochs 40 --batch_size 2 --eval_test
 ```
 
 This trains the U-Net 3D and saves:
-- `output/models/unet3d_best.pth` — best model checkpoint (by validation Dice)
-- `output/models/training_history.npz` — loss and Dice curves per epoch
+- `checkpoints/unet3d_baseline/best.pt` — best checkpoint (by validation Dice)
+- `checkpoints/unet3d_baseline/last.pt` — last checkpoint
+- `checkpoints/unet3d_baseline/history.csv` — loss and Dice curves per epoch
+- `checkpoints/unet3d_baseline/summary.json` — final metrics
 
-### U-Net 3D Architecture
+### U-Net 3D Architecture (`train_unet3d_baseline.py`)
 
-- **Encoder**: 1 → 32 → 64 → 128 → 256 channels, MaxPool3d between levels
-- **Decoder**: 256 → 128 → 64 → 32 channels, ConvTranspose3d + skip connections
-- **Loss**: Dice Loss + BCE (weighted 0.5) for stable training
-- **Optimizer**: Adam with ReduceLROnPlateau scheduler
-- **Early stopping**: patience=10 epochs on validation Dice
-- **Augmentation**: random flips + 90° rotations applied at training time in the DataLoader
+- **Encoder**: 1 → 16 → 32 → 64 → 128 channels, MaxPool3d between levels
+- **Decoder**: 128 → 64 → 32 → 16 channels, ConvTranspose3d + skip connections
+- **Loss**: Dice Loss + BCE (weighted 0.5 each) for stable training
+- **Optimizer**: Adam (lr=1e-3, weight_decay=1e-5)
+- **Dataset**: `FullVolumeNoduleDataset` — loads full volumes, extracts 64³ patches on the fly
+  - 50% patches centred on a nodule bounding box (positive mining)
+  - 50% patches at random positions (background diversity)
+- **Augmentation**: random flips + 90° rotations applied at training time only
+- **Checkpoints**: best (by val Dice) + last saved to `checkpoints/unet3d_baseline/`
 
 ## Future Work
 
