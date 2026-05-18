@@ -420,6 +420,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dice_weight", type=float, default=0.5, help="Weight for Dice loss")
 
     parser.add_argument("--save_dir", type=str, default="checkpoints/unet3d_baseline", help="Directory for checkpoints and logs")
+    parser.add_argument("--resume", action="store_true", help="Resume training from last checkpoint in save_dir")
+    parser.add_argument("--resume_path", type=str, default=None, help="Optional checkpoint path to resume from")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Training device")
     parser.add_argument("--eval_test", action="store_true", help="Evaluate on test split after training")
 
@@ -485,13 +487,43 @@ def main() -> None:
     history: List[Dict[str, float]] = []
     best_val_dice = -1.0
     best_epoch = -1
+    start_epoch = 1
+
+    # Reanudación opcional desde checkpoint y restauración de métricas previas.
+    history_path = os.path.join(args.save_dir, "history.csv")
+    if os.path.exists(history_path):
+        prev_hist_df = pd.read_csv(history_path)
+        if not prev_hist_df.empty:
+            history = prev_hist_df.to_dict(orient="records")
+
+    resume_path = args.resume_path
+    if args.resume and resume_path is None:
+        resume_path = os.path.join(args.save_dir, "last.pt")
+
+    if resume_path is not None:
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        best_val_dice = float(ckpt.get("best_val_dice", best_val_dice))
+
+        if len(history) > 0:
+            best_idx = max(range(len(history)), key=lambda i: float(history[i].get("val_dice", -1.0)))
+            best_epoch = int(history[best_idx].get("epoch", -1))
+
+        print(f"Resumed from: {resume_path}")
+        print(f"Restarting at epoch {start_epoch}/{args.epochs}")
 
     print(f"Device: {device}")
     print(f"Train samples: {len(train_ds)}")
     print(f"Val samples: {len(val_ds)}")
 
     # 4) Bucle principal de entrenamiento.
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_dice = run_epoch(
             model=model,
             loader=train_loader,
@@ -525,16 +557,6 @@ def main() -> None:
             f"val_loss={val_loss:.4f} val_dice={val_dice:.4f}"
         )
 
-        checkpoint_last = {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "best_val_dice": best_val_dice,
-            "args": vars(args),
-        }
-        # Se guarda siempre el último estado para poder reanudar/inspeccionar.
-        torch.save(checkpoint_last, os.path.join(args.save_dir, "last.pt"))
-
         # Se actualiza best.pt solo si mejora Dice de validación.
         if val_dice > best_val_dice:
             best_val_dice = val_dice
@@ -548,8 +570,19 @@ def main() -> None:
             }
             torch.save(checkpoint_best, os.path.join(args.save_dir, "best.pt"))
 
-    hist_df = pd.DataFrame(history)
-    hist_df.to_csv(os.path.join(args.save_dir, "history.csv"), index=False)
+        checkpoint_last = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_val_dice": best_val_dice,
+            "args": vars(args),
+        }
+        # Se guarda siempre el último estado para poder reanudar/inspeccionar.
+        torch.save(checkpoint_last, os.path.join(args.save_dir, "last.pt"))
+
+        # Persistencia incremental para no perder el histórico en cortes de energía.
+        hist_df = pd.DataFrame(history)
+        hist_df.to_csv(history_path, index=False)
 
     # 5) Resumen final y evaluación opcional en test.
     summary = {
