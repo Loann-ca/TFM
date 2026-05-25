@@ -425,6 +425,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Training device")
     parser.add_argument("--eval_test", action="store_true", help="Evaluate on test split after training")
 
+    parser.add_argument("--patience", type=int, default=None, help="Early stopping patience (epochs without improvement)")
+
     return parser.parse_args()
 
 
@@ -488,6 +490,7 @@ def main() -> None:
     best_val_dice = -1.0
     best_epoch = -1
     start_epoch = 1
+    epochs_without_improvement = 0  # Counter for early stopping
 
     # Reanudación opcional desde checkpoint y restauración de métricas previas.
     history_path = os.path.join(args.save_dir, "history.csv")
@@ -557,10 +560,11 @@ def main() -> None:
             f"val_loss={val_loss:.4f} val_dice={val_dice:.4f}"
         )
 
-        # Se actualiza best.pt solo si mejora Dice de validación.
+        # Update best checkpoint if validation Dice improves
         if val_dice > best_val_dice:
             best_val_dice = val_dice
             best_epoch = epoch
+            epochs_without_improvement = 0  # Reset early stopping counter
             checkpoint_best = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -569,6 +573,8 @@ def main() -> None:
                 "args": vars(args),
             }
             torch.save(checkpoint_best, os.path.join(args.save_dir, "best.pt"))
+        else:
+            epochs_without_improvement += 1
 
         checkpoint_last = {
             "epoch": epoch,
@@ -583,6 +589,11 @@ def main() -> None:
         # Persistencia incremental para no perder el histórico en cortes de energía.
         hist_df = pd.DataFrame(history)
         hist_df.to_csv(history_path, index=False)
+
+        # Early stopping check
+        if args.patience is not None and epochs_without_improvement >= args.patience:
+            print(f"Early stopping triggered after {epochs_without_improvement} epochs without improvement.")
+            break
 
     # 5) Resumen final y evaluación opcional en test.
     summary = {
