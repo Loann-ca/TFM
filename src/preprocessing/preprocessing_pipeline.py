@@ -13,7 +13,7 @@ Pasos:
   3. Guardado de volúmenes preprocesados por split
 
 Uso:
-    python preprocessing_pipeline.py --output_dir output
+    python src/preprocessing/preprocessing_pipeline.py --output_dir output
 """
 
 import argparse

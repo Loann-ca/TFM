@@ -8,7 +8,7 @@
 1. Ensure `~/.pylidcrc` points to the DICOM directory.
 2. Run:
    ```bash
-   python process_all_masks.py --output_dir output --clevel 0.5
+   python src/preprocessing/process_all_masks.py --output_dir output --clevel 0.5
    ```
 3. Output: `output/CT/{patient_id}.npy` (full CT), `output/masks/{patient_id}.npy` (full-size mask with all nodules), `output/metadata.csv`.
 
@@ -41,7 +41,7 @@
 
 **Steps:**
 ```bash
-python preprocessing_pipeline.py --output_dir output
+python src/preprocessing/preprocessing_pipeline.py --output_dir output
 ```
 
 **What it does:**
@@ -123,7 +123,7 @@ These shims fix deprecation errors in `pylidc` with numpy ≥1.24 and Python ≥
 
 **Steps:**
 ```bash
-python train_unet3d.py --output_dir output --epochs 50 --batch_size 4 --lr 1e-3
+python src/segmentation/unet3d_segmentation/train_unet3d_baseline.py --output_dir output --epochs 50 --batch_size 4 --lr 1e-3
 ```
 
 **What it does:**

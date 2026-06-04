@@ -135,7 +135,7 @@ pip install pylidc pydicom SimpleITK matplotlib numpy scipy scikit-image tqdm to
 ### Stage 1: Generate Full Volumes and Masks
 
 ```bash
-python process_all_masks.py --output_dir output --clevel 0.5
+python src/preprocessing/process_all_masks.py --output_dir output --clevel 0.5
 ```
 
 This produces:
@@ -146,7 +146,7 @@ This produces:
 ### Stage 2: Preprocess for Training
 
 ```bash
-python preprocessing_pipeline.py --output_dir output
+python src/preprocessing/preprocessing_pipeline.py --output_dir output
 ```
 
 This produces `output/preprocessed/{train,val,test}/` with windowed and normalized full volumes.
@@ -154,7 +154,7 @@ This produces `output/preprocessed/{train,val,test}/` with windowed and normaliz
 ### Stage 3: Train U-Net 3D
 
 ```bash
-python train_unet3d_baseline.py --output_dir output --epochs 40 --batch_size 2 --eval_test
+python src/segmentation/unet3d_segmentation/train_unet3d_baseline.py --output_dir output --epochs 40 --batch_size 2 --eval_test
 ```
 
 This trains the U-Net 3D and saves:

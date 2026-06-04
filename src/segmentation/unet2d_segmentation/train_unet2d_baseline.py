@@ -9,7 +9,7 @@ Expected data layout:
         test/{CT,masks,metadata.csv}
 
 Usage:
-    python train_unet2d_baseline.py --output_dir output --epochs 50 --batch_size 16
+    python src/segmentation/unet2d_segmentation/train_unet2d_baseline.py --output_dir output --epochs 50 --batch_size 16
 """
 
 from __future__ import annotations
@@ -612,7 +612,7 @@ Expected data layout:
         test/{CT,masks,metadata.csv}
 
 Usage:
-    python train_unet2d_baseline.py --output_dir output --epochs 50 --batch_size 16
+    python src/segmentation/unet2d_segmentation/train_unet2d_baseline.py --output_dir output --epochs 50 --batch_size 16
 """
 
 from __future__ import annotations
