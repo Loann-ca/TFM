@@ -13,7 +13,7 @@ Output:
         metadata.csv               — una fila por nódulo con features
 
 Uso:
-    python process_all_masks.py --output_dir output --clevel 0.5
+    python src/preprocessing/process_all_masks.py --output_dir output --clevel 0.5
 """
 
 import argparse

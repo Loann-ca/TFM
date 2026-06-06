@@ -1,7 +1,7 @@
 # Dataset (large DICOM files)
 /lidc_idri
 /tcia-lidc-xml
-
+/dataset
 # Generated output
 /output/
 

@@ -9,7 +9,7 @@ pip install pylidc pydicom SimpleITK matplotlib numpy scipy scikit-image pandas 
 ## 1) Generar volúmenes CT completos y máscaras
 
 ```bash
-python process_all_masks.py --output_dir output --clevel 0.5
+python src/preprocessing/process_all_masks.py --output_dir output --clevel 0.5
 ```
 
 Produce:
@@ -20,7 +20,7 @@ Produce:
 ## 2) Preprocesar para entrenamiento
 
 ```bash
-python preprocessing_pipeline.py --output_dir output
+python src/preprocessing/preprocessing_pipeline.py --output_dir output
 ```
 
 Produce `output/preprocessed/{train,val,test}/` con volúmenes normalizados.
@@ -28,7 +28,7 @@ Produce `output/preprocessed/{train,val,test}/` con volúmenes normalizados.
 ## 3) Entrenar U-Net 3D baseline
 
 ```bash
-python train_unet3d_baseline.py --output_dir output --epochs 40 --batch_size 2 --eval_test
+python src/segmentation/unet3d_segmentation/train_unet3d_baseline.py --output_dir output --epochs 40 --batch_size 2 --eval_test
 ```
 
 Checkpoints guardados en `checkpoints/unet3d_baseline/`:

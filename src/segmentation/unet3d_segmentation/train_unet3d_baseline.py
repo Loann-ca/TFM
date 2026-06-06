@@ -9,7 +9,7 @@ Expected data layout:
         test/{CT,masks,metadata.csv}
 
 Usage:
-    python train_unet3d_baseline.py --output_dir output --epochs 50 --batch_size 4
+    python src/segmentation/unet3d_segmentation/train_unet3d_baseline.py --output_dir output --epochs 50 --batch_size 4
 """
 
 from __future__ import annotations
@@ -63,6 +63,8 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     torch.cuda.manual_seed_all(seed)
 
 
@@ -108,6 +110,7 @@ class FullVolumeNoduleDataset(Dataset):
 
         self.patch_size = patch_size
         self.augment = augment
+        self.seed = seed
         self.seed = seed
 
         meta_path = os.path.join(split_dir, "metadata.csv")
@@ -178,7 +181,7 @@ class FullVolumeNoduleDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         item = self.items[idx]
 
-        rng = np.random.RandomState(self.seed)
+        rng = np.random.RandomState(self.seed*1000 + idx)
         half = self.patch_size // 2
         cx, cy, cz = item.center
 
@@ -198,6 +201,7 @@ class FullVolumeNoduleDataset(Dataset):
         mask = (mask > 0.5).astype(np.float32)
 
         if self.augment:
+            ct, mask = maybe_augment_3d(ct, mask, rng)
             ct, mask = maybe_augment_3d(ct, mask, rng)
 
         # (H, W, D) → (D, H, W) → add channel dim.
@@ -411,6 +415,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--output_dir", type=str, default="output", help="Root output directory")
     parser.add_argument("--epochs", type=int, default=150, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=150, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
@@ -422,6 +427,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base_channels", type=int, default=16, help="U-Net base channels")
     parser.add_argument("--bce_weight", type=float, default=0.5, help="Weight for BCE loss")
     parser.add_argument("--dice_weight", type=float, default=0.5, help="Weight for Dice loss")
+    parser.add_argument("--patience", type=int, default=25, help="Early stopping patience (epochs without improvement)")
+    parser.add_argument("--lr_patience", type=int, default=5, help="ReduceLROnPlateau patience")
+    parser.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
     parser.add_argument("--patience", type=int, default=25, help="Early stopping patience (epochs without improvement)")
     parser.add_argument("--lr_patience", type=int, default=5, help="ReduceLROnPlateau patience")
     parser.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
@@ -490,6 +498,10 @@ def main() -> None:
     # 3) Modelo y optimizador.
     model = UNet3D(in_channels=1, out_channels=1, base_channels=args.base_channels).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=args.lr_factor,
+        patience=args.lr_patience, verbose=True,
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=args.lr_factor,
         patience=args.lr_patience, verbose=True,
@@ -563,9 +575,12 @@ def main() -> None:
         history.append(row)
 
         current_lr = optimizer.param_groups[0]["lr"]
+        current_lr = optimizer.param_groups[0]["lr"]
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
             f"train_loss={train_loss:.4f} train_dice={train_dice:.4f} | "
+            f"val_loss={val_loss:.4f} val_dice={val_dice:.4f} | "
+            f"lr={current_lr:.1e}"
             f"val_loss={val_loss:.4f} val_dice={val_dice:.4f} | "
             f"lr={current_lr:.1e}"
         )
@@ -582,6 +597,16 @@ def main() -> None:
                 "args": vars(args),
             }
             torch.save(checkpoint_best, os.path.join(args.save_dir, "best.pt"))
+
+        # ReduceLROnPlateau: reduce lr si val_loss no mejora
+        scheduler.step(val_dice)
+
+        # Early stopping
+        epochs_without_improvement = epoch - best_epoch
+        if best_epoch > 0 and epochs_without_improvement >= args.patience:
+            print(f"\nEarly stopping en epoch {epoch}. "
+                  f"Mejor: epoch {best_epoch} con Dice {best_val_dice:.4f}")
+            break
 
         # ReduceLROnPlateau: reduce lr si val_loss no mejora
         scheduler.step(val_dice)
