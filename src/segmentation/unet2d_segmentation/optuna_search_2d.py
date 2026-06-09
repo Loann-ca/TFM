@@ -2,6 +2,7 @@ import optuna
 import subprocess
 import os
 import json
+import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
@@ -50,7 +51,7 @@ def objective(trial):
     )
     
     cmd = [
-        "python",
+        sys.executable,
         TRAIN_SCRIPT,
         "--lr", str(lr),
         "--base_channels", str(base_channels),
@@ -92,8 +93,8 @@ def objective(trial):
 
 
 # Crear estudio con almacenamiento persistente
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    storage = _sqlite_url(os.path.join(RESULTS_DIR, "optuna_study_2d.db"))
+os.makedirs(RESULTS_DIR, exist_ok=True)
+storage = _sqlite_url(os.path.join(RESULTS_DIR, "optuna_study_2d.db"))
 study = optuna.create_study(
     direction="maximize",
     study_name="unet2d_hp_search",
