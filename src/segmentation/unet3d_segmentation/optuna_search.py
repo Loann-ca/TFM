@@ -73,8 +73,10 @@ def objective(trial):
         if os.path.exists(summary_path):
             with open(summary_path) as f:
                 result = json.load(f)
-            val_dice = result.get("best_val_dice", 0.0)
-            print(f"[Trial {trial_id}] Best val Dice: {val_dice:.4f}")
+            # Use foreground Dice (nodule-only) as objective; fall back to overall Dice
+            # for old checkpoints that pre-date the fg_dice metric.
+            val_dice = result.get("best_val_fg_dice", result.get("best_val_dice", 0.0))
+            print(f"[Trial {trial_id}] Best val fg_Dice: {val_dice:.4f}")
             return val_dice
         else:
             print(f"[Trial {trial_id}] Error: summary.json no encontrado")
