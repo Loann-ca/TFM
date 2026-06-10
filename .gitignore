@@ -4,7 +4,8 @@
 /dataset
 # Generated output
 /output/
-
+/checkpoints/
+/optuna/
 # Python
 __pycache__/
 *.pyc
