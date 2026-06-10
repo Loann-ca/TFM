@@ -42,6 +42,11 @@ def objective(trial):
     # Muestreo de parches: 70% centrados en nódulo, 30% aleatorios.
     positive_fraction = 0.7
     
+    # Técnicas de mejora: Focal Loss + Squeeze-Excitation blocks
+    use_focal_loss = True
+    focal_gamma = 2.0
+    use_se_blocks = True
+    
     # Nombre único para cada trial
     trial_id = trial.number
     save_dir = os.path.join(RESULTS_DIR, f"trial_{trial_id}_lr_{lr:.1e}_ch_{base_channels}")
@@ -64,11 +69,17 @@ def objective(trial):
         "--patience", "30",
     ]
     
+    if use_focal_loss:
+        cmd.extend(["--use_focal_loss", "--focal_gamma", str(focal_gamma)])
+    if use_se_blocks:
+        cmd.append("--use_se_blocks")
+    
     print(f"\n[Trial {trial_id}] Running with:")
     print(f"  lr={lr:.1e}, channels={base_channels}, batch={batch_size}")
     print(f"  positive_fraction={positive_fraction:.2f}")
     print(f"  bce_weight={bce_weight:.2f}, dice_weight={dice_weight:.2f}")
     print(f"  weight_decay={weight_decay:.1e}, lr_patience={lr_patience}")
+    print(f"  use_focal_loss={use_focal_loss} (gamma={focal_gamma}), use_se_blocks={use_se_blocks}")
     
     try:
         subprocess.run(cmd, check=True)

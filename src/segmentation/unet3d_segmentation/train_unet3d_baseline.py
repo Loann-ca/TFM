@@ -236,6 +236,29 @@ class DoubleConv3D(nn.Module):
         return self.block(x)
 
 
+class SqueezeExcitation3D(nn.Module):
+    """Squeeze-Excitation (SE) block para U-Net 3D.
+    Recalibra channel-wise feature maps adaptivamente.
+    """
+    def __init__(self, channels: int, reduction: int = 16) -> None:
+        super().__init__()
+        self.fc1 = nn.Conv3d(channels, max(1, channels // reduction), kernel_size=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv3d(max(1, channels // reduction), channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Squeeze: promedia sobre spatial dims (D, H, W)
+        se = F.adaptive_avg_pool3d(x, 1)
+        # Excitation: capas FC via 1x1x1 conv
+        se = self.fc1(se)
+        se = self.relu(se)
+        se = self.fc2(se)
+        se = self.sigmoid(se)
+        # Scale: multiplica elemento a elemento por canal
+        return x * se
+
+
 class UNet3D(nn.Module):
     def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
         super().__init__()
@@ -320,6 +343,83 @@ class UNet3D(nn.Module):
         return self.out_conv(d1)
 
 
+class UNet3D_SE(nn.Module):
+    """U-Net 3D con Squeeze-Excitation (SE) blocks en el decoder.
+    Los SE blocks recalibran adaptivamente los feature maps por canal,
+    mejorando la capacidad del modelo para enfatizar características de nódulos.
+    """
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
+        super().__init__()
+
+        # Encoder
+        self.enc1 = DoubleConv3D(in_channels, base_channels)
+        self.enc2 = DoubleConv3D(base_channels, base_channels * 2)
+        self.enc3 = DoubleConv3D(base_channels * 2, base_channels * 4)
+        self.bottleneck = DoubleConv3D(base_channels * 4, base_channels * 8)
+        self.pool = nn.MaxPool3d(kernel_size=2)
+
+        # Decoder con SE blocks
+        self.up3 = nn.ConvTranspose3d(base_channels * 8, base_channels * 4, kernel_size=2, stride=2)
+        self.se3 = SqueezeExcitation3D(base_channels * 4)
+        self.dec3 = DoubleConv3D(base_channels * 8, base_channels * 4)
+
+        self.up2 = nn.ConvTranspose3d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2)
+        self.se2 = SqueezeExcitation3D(base_channels * 2)
+        self.dec2 = DoubleConv3D(base_channels * 4, base_channels * 2)
+
+        self.up1 = nn.ConvTranspose3d(base_channels * 2, base_channels, kernel_size=2, stride=2)
+        self.se1 = SqueezeExcitation3D(base_channels)
+        self.dec1 = DoubleConv3D(base_channels * 2, base_channels)
+
+        self.out_conv = nn.Conv3d(base_channels, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        b = self.bottleneck(self.pool(e3))
+
+        d3 = self.up3(b)
+        d3 = self.se3(d3)  # Recalibrar features antes de concatenar
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        d2 = self.se2(d2)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2)
+
+        d1 = self.up1(d2)
+        d1 = self.se1(d1)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1)
+
+        return self.out_conv(d1)
+
+
+class FocalLoss(nn.Module):
+    """Focal Loss para segmentación binaria. Enfatiza muestras difíciles.
+
+    FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
+
+    alpha: balance entre clases. Por defecto 0.5 (no hay balance).
+    gamma: exponente de foco. gamma=0 → BCE; gamma=2 enfatiza muestras difíciles.
+    """
+    def __init__(self, alpha: float = 0.5, gamma: float = 2.0, pos_weight: float = 1.0) -> None:
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.pos_weight = pos_weight
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        p_t = torch.where(targets == 1, probs, 1 - probs)
+        focal_weight = (1.0 - p_t).pow(self.gamma)
+        loss = self.alpha * focal_weight * ce
+        return loss.mean()
+
+
 def dice_loss_from_logits(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     # Dice sobre probabilidades; se combina con BCE para entrenamiento estable.
     probs = torch.sigmoid(logits)
@@ -373,6 +473,7 @@ def run_epoch(
     device: torch.device,
     bce_weight: float,
     dice_weight: float,
+    focal_loss: nn.Module | None = None,
 ) -> Tuple[float, float, float]:
     """Returns (mean_loss, mean_dice_all, mean_dice_fg).
 
@@ -399,7 +500,10 @@ def run_epoch(
             y = batch["mask"].to(device, non_blocking=True)
 
             logits = model(x)
-            loss_bce = bce(logits, y)
+            if focal_loss is not None:
+                loss_bce = focal_loss(logits, y)
+            else:
+                loss_bce = bce(logits, y)
             loss_dice = dice_loss_from_logits(logits, y)
             # Loss total ponderada.
             loss = bce_weight * loss_bce + dice_weight * loss_dice
@@ -468,6 +572,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base_channels", type=int, default=16, help="U-Net base channels")
     parser.add_argument("--bce_weight", type=float, default=0.5, help="Weight for BCE loss")
     parser.add_argument("--dice_weight", type=float, default=0.5, help="Weight for Dice loss")
+    parser.add_argument("--use_focal_loss", action="store_true", help="Use Focal Loss instead of BCE")
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Gamma parameter for Focal Loss (focus on hard samples)")
+    parser.add_argument("--use_se_blocks", action="store_true", help="Use Squeeze-Excitation blocks in decoder (UNet3D_SE)")
     parser.add_argument("--patience", type=int, default=25, help="Early stopping patience (epochs without improvement)")
     parser.add_argument("--lr_patience", type=int, default=5, help="ReduceLROnPlateau patience")
     parser.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
@@ -536,8 +643,17 @@ def main() -> None:
     )
 
     # 3) Modelo y optimizador.
-    model = UNet3D(in_channels=1, out_channels=1, base_channels=args.base_channels).to(device)
+    if args.use_se_blocks:
+        model = UNet3D_SE(in_channels=1, out_channels=1, base_channels=args.base_channels).to(device)
+        print("Using UNet3D with Squeeze-Excitation blocks")
+    else:
+        model = UNet3D(in_channels=1, out_channels=1, base_channels=args.base_channels).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    
+    focal_loss = None
+    if args.use_focal_loss:
+        focal_loss = FocalLoss(alpha=0.5, gamma=args.focal_gamma)
+        print(f"Using Focal Loss with gamma={args.focal_gamma}")
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=args.lr_factor,
         patience=args.lr_patience, verbose=True,
@@ -592,6 +708,7 @@ def main() -> None:
             device=device,
             bce_weight=args.bce_weight,
             dice_weight=args.dice_weight,
+            focal_loss=focal_loss,
         )
 
         val_loss, val_dice, val_fg_dice = run_epoch(
@@ -601,7 +718,7 @@ def main() -> None:
             device=device,
             bce_weight=args.bce_weight,
             dice_weight=args.dice_weight,
-        )
+            focal_loss=focal_loss,            focal_loss=focal_loss,        )
 
         row = {
             "epoch": epoch,
