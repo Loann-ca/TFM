@@ -718,7 +718,7 @@ def main() -> None:
             device=device,
             bce_weight=args.bce_weight,
             dice_weight=args.dice_weight,
-            focal_loss=focal_loss,            focal_loss=focal_loss,        )
+            focal_loss=focal_loss)
 
         row = {
             "epoch": epoch,
