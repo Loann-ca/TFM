@@ -38,6 +38,9 @@ def objective(trial):
         batch_size = 3
     else:
         batch_size = 2
+
+    # Muestreo de parches: 70% centrados en nódulo, 30% aleatorios.
+    positive_fraction = 0.7
     
     # Nombre único para cada trial
     trial_id = trial.number
@@ -50,6 +53,7 @@ def objective(trial):
         "--lr", str(lr),
         "--base_channels", str(base_channels),
         "--batch_size", str(batch_size),
+        "--positive_fraction", str(positive_fraction),
         "--output_dir", OUTPUT_DIR,
         "--save_dir", save_dir,
         "--epochs", "100",
@@ -62,6 +66,7 @@ def objective(trial):
     
     print(f"\n[Trial {trial_id}] Running with:")
     print(f"  lr={lr:.1e}, channels={base_channels}, batch={batch_size}")
+    print(f"  positive_fraction={positive_fraction:.2f}")
     print(f"  bce_weight={bce_weight:.2f}, dice_weight={dice_weight:.2f}")
     print(f"  weight_decay={weight_decay:.1e}, lr_patience={lr_patience}")
     

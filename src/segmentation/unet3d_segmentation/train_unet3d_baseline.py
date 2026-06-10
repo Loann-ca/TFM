@@ -97,6 +97,7 @@ class FullVolumeNoduleDataset(Dataset):
         split_dir: str,
         patch_size: int = 64,
         patches_per_patient: int = 8,
+        positive_fraction: float = 0.7,
         augment: bool = False,
         seed: int = 42,
     ) -> None:
@@ -105,8 +106,11 @@ class FullVolumeNoduleDataset(Dataset):
             raise ValueError("patch_size must be a positive even integer.")
         if patches_per_patient <= 0:
             raise ValueError("patches_per_patient must be > 0.")
+        if not (0.0 <= positive_fraction <= 1.0):
+            raise ValueError("positive_fraction must be in [0.0, 1.0].")
 
         self.patch_size = patch_size
+        self.positive_fraction = positive_fraction
         self.augment = augment
         self.seed = seed
 
@@ -155,8 +159,12 @@ class FullVolumeNoduleDataset(Dataset):
                 cz = int(np.clip(cz, half, max_z))
                 nodule_centers.append((cx, cy, cz))
 
-            # Balance simple: mitad patches positivos, mitad de fondo aleatorio.
-            n_nodule = max(1, patches_per_patient // 2)
+            # Balance configurable: fracción de patches positivos + resto aleatorios.
+            if patches_per_patient == 1:
+                n_nodule = 1 if self.positive_fraction >= 0.5 else 0
+            else:
+                n_nodule = int(round(patches_per_patient * self.positive_fraction))
+                n_nodule = int(np.clip(n_nodule, 1, patches_per_patient - 1))
             n_random = patches_per_patient - n_nodule
 
             for i in range(n_nodule):
@@ -338,13 +346,12 @@ def dice_score_from_logits(logits: torch.Tensor, targets: torch.Tensor, threshol
     return float(dice.mean().item())
 
 
-def foreground_dice_score_from_logits(
+def dice_scores_and_fg_mask_from_logits(
     logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5, eps: float = 1e-6
-) -> float | None:
-    """Dice only on patches that contain at least one positive voxel in the target.
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return per-sample Dice scores and foreground mask for the batch.
 
-    Returns None if no foreground patch exists in the batch (caller should skip).
-    Background-only patches are excluded so the metric reflects true nodule overlap.
+    The foreground mask marks samples with at least one positive voxel in target.
     """
     probs = torch.sigmoid(logits)
     preds = (probs >= threshold).float()
@@ -352,17 +359,11 @@ def foreground_dice_score_from_logits(
     preds_flat = preds.contiguous().view(preds.size(0), -1)
     targets_flat = targets.contiguous().view(targets.size(0), -1)
 
+    inter = (preds_flat * targets_flat).sum(dim=1)
+    denom = preds_flat.sum(dim=1) + targets_flat.sum(dim=1)
+    dice_per_sample = (2.0 * inter + eps) / (denom + eps)
     fg_mask = targets_flat.sum(dim=1) > 0
-    if fg_mask.sum() == 0:
-        return None  # batch has no foreground patches
-
-    preds_fg = preds_flat[fg_mask]
-    targets_fg = targets_flat[fg_mask]
-
-    inter = (preds_fg * targets_fg).sum(dim=1)
-    denom = preds_fg.sum(dim=1) + targets_fg.sum(dim=1)
-    dice = (2.0 * inter + eps) / (denom + eps)
-    return float(dice.mean().item())
+    return dice_per_sample, fg_mask
 
 
 def run_epoch(
@@ -386,7 +387,8 @@ def run_epoch(
     total_dice = 0.0
     total_fg_dice = 0.0
     n_batches = 0
-    n_fg_batches = 0
+    n_samples = 0
+    n_fg_samples = 0
 
     bce = nn.BCEWithLogitsLoss()
 
@@ -407,19 +409,21 @@ def run_epoch(
                 loss.backward()
                 optimizer.step()
 
-            batch_dice = dice_score_from_logits(logits, y)
             total_loss += float(loss.item())
-            total_dice += batch_dice
             n_batches += 1
 
-            batch_fg_dice = foreground_dice_score_from_logits(logits, y)
-            if batch_fg_dice is not None:
-                total_fg_dice += batch_fg_dice
-                n_fg_batches += 1
+            dice_per_sample, fg_mask = dice_scores_and_fg_mask_from_logits(logits, y)
+            total_dice += float(dice_per_sample.sum().item())
+            n_samples += int(dice_per_sample.numel())
+
+            if bool(fg_mask.any().item()):
+                total_fg_dice += float(dice_per_sample[fg_mask].sum().item())
+                n_fg_samples += int(fg_mask.sum().item())
 
     mean_loss = total_loss / max(n_batches, 1)
-    mean_dice = total_dice / max(n_batches, 1)
-    mean_fg_dice = total_fg_dice / max(n_fg_batches, 1)
+    mean_dice = total_dice / max(n_samples, 1)
+    # If no foreground samples exist, fall back to overall Dice to avoid a fake 0.0.
+    mean_fg_dice = (total_fg_dice / n_fg_samples) if n_fg_samples > 0 else mean_dice
     return mean_loss, mean_dice, mean_fg_dice
 
 
@@ -460,6 +464,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--patch_size", type=int, default=64, help="Patch side length in voxels (default: 64)")
     parser.add_argument("--patches_per_patient", type=int, default=8, help="Patches generated per patient per epoch (default: 8)")
+    parser.add_argument("--positive_fraction", type=float, default=0.7, help="Fraction of positive (nodule-centered) patches per patient (default: 0.7)")
     parser.add_argument("--base_channels", type=int, default=16, help="U-Net base channels")
     parser.add_argument("--bce_weight", type=float, default=0.5, help="Weight for BCE loss")
     parser.add_argument("--dice_weight", type=float, default=0.5, help="Weight for Dice loss")
@@ -502,6 +507,7 @@ def main() -> None:
         train_dir,
         patch_size=args.patch_size,
         patches_per_patient=args.patches_per_patient,
+        positive_fraction=args.positive_fraction,
         augment=True,
         seed=args.seed,
     )
@@ -509,6 +515,7 @@ def main() -> None:
         val_dir,
         patch_size=args.patch_size,
         patches_per_patient=args.patches_per_patient,
+        positive_fraction=args.positive_fraction,
         augment=False,
         seed=args.seed,
     )
@@ -563,6 +570,7 @@ def main() -> None:
 
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         best_val_dice = float(ckpt.get("best_val_dice", best_val_dice))
+        best_val_fg_dice = float(ckpt.get("best_val_fg_dice", best_val_dice))
 
         if len(history) > 0:
             best_idx = int(max(range(len(history)), key=lambda i: float(history[i].get("val_fg_dice", history[i].get("val_dice", -1.0)))))
@@ -666,6 +674,7 @@ def main() -> None:
             test_dir,
             patch_size=args.patch_size,
             patches_per_patient=args.patches_per_patient,
+            positive_fraction=args.positive_fraction,
             augment=False,
             seed=args.seed,
         )
