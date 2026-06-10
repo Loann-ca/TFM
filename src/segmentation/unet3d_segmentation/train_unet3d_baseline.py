@@ -158,8 +158,8 @@ class FullVolumeNoduleDataset(Dataset):
                 cz = int(np.clip(cz, half, max_z))
                 nodule_centers.append((cx, cy, cz))
 
-            # Balance simple: mitad patches positivos, mitad de fondo aleatorio.
-            n_nodule = max(1, patches_per_patient // 2)
+            # 75% patches con nódulo, 25% fondo.
+            n_nodule = int(patches_per_patient * 0.75)
             n_random = patches_per_patient - n_nodule
 
             for i in range(n_nodule):
@@ -456,7 +456,6 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--output_dir", type=str, default="output", help="Root output directory")
     parser.add_argument("--epochs", type=int, default=150, help="Number of training epochs")
-    parser.add_argument("--epochs", type=int, default=150, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
@@ -465,12 +464,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--patch_size", type=int, default=64, help="Patch side length in voxels (default: 64)")
     parser.add_argument("--patches_per_patient", type=int, default=8, help="Patches generated per patient per epoch (default: 8)")
-    parser.add_argument("--base_channels", type=int, default=16, help="U-Net base channels")
-    parser.add_argument("--bce_weight", type=float, default=0.5, help="Weight for BCE loss")
-    parser.add_argument("--dice_weight", type=float, default=0.5, help="Weight for Dice loss")
-    parser.add_argument("--patience", type=int, default=25, help="Early stopping patience (epochs without improvement)")
-    parser.add_argument("--lr_patience", type=int, default=5, help="ReduceLROnPlateau patience")
-    parser.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
+    parser.add_argument("--base_channels", type=int, default=48, help="U-Net base channels")
+    parser.add_argument("--bce_weight", type=float, default=0.174875525144015, help="Weight for BCE loss")
+    parser.add_argument("--dice_weight", type=float, default=0.825124474855985, help="Weight for Dice loss")
     parser.add_argument("--patience", type=int, default=25, help="Early stopping patience (epochs without improvement)")
     parser.add_argument("--lr_patience", type=int, default=5, help="ReduceLROnPlateau patience")
     parser.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
@@ -724,6 +720,60 @@ def main() -> None:
     print(f"Best val dice (all): {best_val_dice:.4f}")
     print(f"Artifacts saved in: {args.save_dir}")
 
+def train_model(config):
+    set_seed(42)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    train_ds = FullVolumeNoduleDataset(
+        os.path.join(config["data_dir"], "train"),
+        patch_size=config.get("patch_size", 64),
+        patches_per_patient=config.get("patches_per_patient", 8),
+        augment=True,
+        seed=42,
+    )
+
+    val_ds = FullVolumeNoduleDataset(
+        os.path.join(config["data_dir"], "val"),
+        patch_size=config.get("patch_size", 64),
+        patches_per_patient=config.get("patches_per_patient", 8),
+        augment=False,
+        seed=42,
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=config["batch_size"],
+        shuffle=True,
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=config["batch_size"],
+        shuffle=False,
+    )
+
+    model = UNet3D(base_channels=config["base_channels"]).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
+
+    best_val = -1
+
+    for epoch in range(config["epochs"]):
+
+        train_loss, train_dice = run_epoch(
+            model, train_loader, optimizer, device,
+            config["bce_weight"], config["dice_weight"]
+        )
+
+        val_loss, val_dice = run_epoch(
+            model, val_loader, None, device,
+            config["bce_weight"], config["dice_weight"]
+        )
+
+        best_val = max(best_val, val_dice)
+
+    return best_val
 
 if __name__ == "__main__":
     main()
