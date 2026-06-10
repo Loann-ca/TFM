@@ -446,26 +446,6 @@ def dice_score_from_logits(logits: torch.Tensor, targets: torch.Tensor, threshol
     return float(dice.mean().item())
 
 
-def dice_scores_and_fg_mask_from_logits(
-    logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5, eps: float = 1e-6
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return per-sample Dice scores and foreground mask for the batch.
-
-    The foreground mask marks samples with at least one positive voxel in target.
-    """
-    probs = torch.sigmoid(logits)
-    preds = (probs >= threshold).float()
-
-    preds_flat = preds.contiguous().view(preds.size(0), -1)
-    targets_flat = targets.contiguous().view(targets.size(0), -1)
-
-    inter = (preds_flat * targets_flat).sum(dim=1)
-    denom = preds_flat.sum(dim=1) + targets_flat.sum(dim=1)
-    dice_per_sample = (2.0 * inter + eps) / (denom + eps)
-    fg_mask = targets_flat.sum(dim=1) > 0
-    return dice_per_sample, fg_mask
-
-
 def run_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -474,22 +454,14 @@ def run_epoch(
     bce_weight: float,
     dice_weight: float,
     focal_loss: nn.Module | None = None,
-) -> Tuple[float, float, float]:
-    """Returns (mean_loss, mean_dice_all, mean_dice_fg).
-
-    mean_dice_fg is computed only over patches that contain nodule voxels and
-    is the primary metric for model selection and hyperparameter search.
-    mean_dice_all is kept for logging/debugging.
-    """
+) -> Tuple[float, float]:
+    """Returns (mean_loss, mean_dice)."""
     train_mode = optimizer is not None
     model.train() if train_mode else model.eval()
 
     total_loss = 0.0
     total_dice = 0.0
-    total_fg_dice = 0.0
     n_batches = 0
-    n_samples = 0
-    n_fg_samples = 0
 
     bce = nn.BCEWithLogitsLoss()
 
@@ -516,19 +488,12 @@ def run_epoch(
             total_loss += float(loss.item())
             n_batches += 1
 
-            dice_per_sample, fg_mask = dice_scores_and_fg_mask_from_logits(logits, y)
-            total_dice += float(dice_per_sample.sum().item())
-            n_samples += int(dice_per_sample.numel())
-
-            if bool(fg_mask.any().item()):
-                total_fg_dice += float(dice_per_sample[fg_mask].sum().item())
-                n_fg_samples += int(fg_mask.sum().item())
+            dice_score = dice_score_from_logits(logits, y)
+            total_dice += dice_score
 
     mean_loss = total_loss / max(n_batches, 1)
-    mean_dice = total_dice / max(n_samples, 1)
-    # If no foreground samples exist, fall back to overall Dice to avoid a fake 0.0.
-    mean_fg_dice = (total_fg_dice / n_fg_samples) if n_fg_samples > 0 else mean_dice
-    return mean_loss, mean_dice, mean_fg_dice
+    mean_dice = total_dice / max(n_batches, 1)
+    return mean_loss, mean_dice
 
 
 def evaluate_test(
@@ -539,7 +504,7 @@ def evaluate_test(
     dice_weight: float,
 ) -> Dict[str, float]:
     # Reusa run_epoch en modo evaluación para el split de test.
-    test_loss, test_dice, test_fg_dice = run_epoch(
+    test_loss, test_dice = run_epoch(
         model=model,
         loader=test_loader,
         optimizer=None,
@@ -550,7 +515,6 @@ def evaluate_test(
     return {
         "test_loss": test_loss,
         "test_dice": test_dice,
-        "test_fg_dice": test_fg_dice,
     }
 
 
@@ -686,10 +650,9 @@ def main() -> None:
 
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         best_val_dice = float(ckpt.get("best_val_dice", best_val_dice))
-        best_val_fg_dice = float(ckpt.get("best_val_fg_dice", best_val_dice))
 
         if len(history) > 0:
-            best_idx = int(max(range(len(history)), key=lambda i: float(history[i].get("val_fg_dice", history[i].get("val_dice", -1.0)))))
+            best_idx = int(max(range(len(history)), key=lambda i: float(history[i].get("val_dice", -1.0))))
             best_epoch = int(history[best_idx].get("epoch", -1))
 
         print(f"Resumed from: {resume_path}")
@@ -701,7 +664,7 @@ def main() -> None:
 
     # 4) Bucle principal de entrenamiento.
     for epoch in range(start_epoch, args.epochs + 1):
-        train_loss, train_dice, train_fg_dice = run_epoch(
+        train_loss, train_dice = run_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
@@ -711,7 +674,7 @@ def main() -> None:
             focal_loss=focal_loss,
         )
 
-        val_loss, val_dice, val_fg_dice = run_epoch(
+        val_loss, val_dice = run_epoch(
             model=model,
             loader=val_loader,
             optimizer=None,
@@ -724,24 +687,21 @@ def main() -> None:
             "epoch": epoch,
             "train_loss": train_loss,
             "train_dice": train_dice,
-            "train_fg_dice": train_fg_dice,
             "val_loss": val_loss,
             "val_dice": val_dice,
-            "val_fg_dice": val_fg_dice,
         }
         history.append(row)
 
         current_lr = optimizer.param_groups[0]["lr"]
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
-            f"train_loss={train_loss:.4f} train_dice={train_dice:.4f} train_fg_dice={train_fg_dice:.4f} | "
-            f"val_loss={val_loss:.4f} val_dice={val_dice:.4f} val_fg_dice={val_fg_dice:.4f} | "
+            f"train_loss={train_loss:.4f} train_dice={train_dice:.4f} | "
+            f"val_loss={val_loss:.4f} val_dice={val_dice:.4f} | "
             f"lr={current_lr:.1e}"
         )
 
-        # Se actualiza best.pt solo si mejora el Dice foreground de validación.
-        if val_fg_dice > best_val_fg_dice:
-            best_val_fg_dice = val_fg_dice
+        # Se actualiza best.pt solo si mejora el Dice de validación.
+        if val_dice > best_val_dice:
             best_val_dice = val_dice
             best_epoch = epoch
             checkpoint_best = {
@@ -749,19 +709,18 @@ def main() -> None:
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_val_dice": best_val_dice,
-                "best_val_fg_dice": best_val_fg_dice,
                 "args": vars(args),
             }
             torch.save(checkpoint_best, os.path.join(args.save_dir, "best.pt"))
 
-        # ReduceLROnPlateau: reduce lr si val_fg_dice no mejora
-        scheduler.step(val_fg_dice)
+        # ReduceLROnPlateau: reduce lr si val_dice no mejora
+        scheduler.step(val_dice)
 
         # Early stopping
         epochs_without_improvement = epoch - best_epoch
         if best_epoch > 0 and epochs_without_improvement >= args.patience:
             print(f"\nEarly stopping en epoch {epoch}. "
-                  f"Mejor: epoch {best_epoch} con fg_Dice {best_val_fg_dice:.4f}")
+                  f"Mejor: epoch {best_epoch} con Dice {best_val_dice:.4f}")
             break
 
         checkpoint_last = {
@@ -769,7 +728,6 @@ def main() -> None:
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "best_val_dice": best_val_dice,
-            "best_val_fg_dice": best_val_fg_dice,
             "args": vars(args),
         }
         # Se guarda siempre el último estado para poder reanudar/inspeccionar.
@@ -783,7 +741,6 @@ def main() -> None:
     summary = {
         "best_epoch": best_epoch,
         "best_val_dice": best_val_dice,
-        "best_val_fg_dice": best_val_fg_dice,
     }
 
     if args.eval_test:
@@ -815,14 +772,13 @@ def main() -> None:
             dice_weight=args.dice_weight,
         )
         summary.update(test_metrics)
-        print(f"Test | loss={test_metrics['test_loss']:.4f} dice={test_metrics['test_dice']:.4f} fg_dice={test_metrics['test_fg_dice']:.4f}")
+        print(f"Test | loss={test_metrics['test_loss']:.4f} dice={test_metrics['test_dice']:.4f}")
 
     with open(os.path.join(args.save_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print("Training finished.")
-    print(f"Best val fg_dice: {best_val_fg_dice:.4f} (epoch {best_epoch})")
-    print(f"Best val dice (all): {best_val_dice:.4f}")
+    print(f"Best val dice: {best_val_dice:.4f} (epoch {best_epoch})")
     print(f"Artifacts saved in: {args.save_dir}")
 
 
