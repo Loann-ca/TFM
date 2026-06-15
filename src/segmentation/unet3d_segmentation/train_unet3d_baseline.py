@@ -15,10 +15,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import random
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -435,6 +437,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
 
     parser.add_argument("--save_dir", type=str, default="checkpoints/unet3d_baseline", help="Directory for checkpoints and logs")
+    parser.add_argument("--run_name", type=str, default=None, help="Optional run folder name inside save_dir")
     parser.add_argument("--resume", action="store_true", help="Resume training from last checkpoint in save_dir")
     parser.add_argument("--resume_path", type=str, default=None, help="Optional checkpoint path to resume from")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Training device")
@@ -443,10 +446,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _default_run_name() -> str:
+    return f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+
+
+def _latest_run_dir(save_dir: str) -> str | None:
+    if not os.path.isdir(save_dir):
+        return None
+
+    candidates: List[str] = []
+    for entry in os.listdir(save_dir):
+        path = os.path.join(save_dir, entry)
+        if os.path.isdir(path) and entry.startswith("run_"):
+            candidates.append(path)
+
+    if not candidates:
+        return None
+
+    candidates.sort()
+    return candidates[-1]
+
+
 def main() -> None:
     # 1) Configuración general.
     args = parse_args()
     set_seed(args.seed)
+    started_at_utc = datetime.now(timezone.utc).isoformat()
 
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -463,6 +488,22 @@ def main() -> None:
     test_dir = os.path.join(preprocessed_root, "test")
 
     os.makedirs(args.save_dir, exist_ok=True)
+
+    resume_path = args.resume_path
+    if resume_path is not None:
+        run_dir = os.path.dirname(os.path.abspath(resume_path))
+    elif args.resume:
+        latest = _latest_run_dir(args.save_dir)
+        if latest is None:
+            raise FileNotFoundError(f"No run directories found in: {args.save_dir}")
+        run_dir = latest
+        resume_path = os.path.join(run_dir, "last.pt")
+    else:
+        run_dir_name = args.run_name.strip() if args.run_name else _default_run_name()
+        run_dir = os.path.join(args.save_dir, run_dir_name)
+
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"Run directory: {run_dir}")
 
     # 2) Dataset y DataLoader para train/val.
     train_ds = FullVolumeNoduleDataset(
@@ -498,14 +539,14 @@ def main() -> None:
     # 3) Modelo y optimizador.
     model = UNet3D(in_channels=1, out_channels=1, base_channels=args.base_channels).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=args.lr_factor,
-        patience=args.lr_patience, verbose=True,
-    )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=args.lr_factor,
-        patience=args.lr_patience, verbose=True,
-    )
+    scheduler_kwargs = {
+        "mode": "max",
+        "factor": args.lr_factor,
+        "patience": args.lr_patience,
+    }
+    if "verbose" in inspect.signature(torch.optim.lr_scheduler.ReduceLROnPlateau).parameters:
+        scheduler_kwargs["verbose"] = True
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **scheduler_kwargs)
 
     history: List[Dict[str, float]] = []
     best_val_dice = -1.0
@@ -514,15 +555,11 @@ def main() -> None:
     start_epoch = 1
 
     # Reanudación opcional desde checkpoint y restauración de métricas previas.
-    history_path = os.path.join(args.save_dir, "history.csv")
+    history_path = os.path.join(run_dir, "history.csv")
     if os.path.exists(history_path):
         prev_hist_df = pd.read_csv(history_path)
         if not prev_hist_df.empty:
             history = prev_hist_df.to_dict(orient="records")
-
-    resume_path = args.resume_path
-    if args.resume and resume_path is None:
-        resume_path = os.path.join(args.save_dir, "last.pt")
 
     if resume_path is not None:
         if not os.path.exists(resume_path):
@@ -595,7 +632,7 @@ def main() -> None:
                 "best_val_dice": best_val_dice,
                 "args": vars(args),
             }
-            torch.save(checkpoint_best, os.path.join(args.save_dir, "best.pt"))
+            torch.save(checkpoint_best, os.path.join(run_dir, "best.pt"))
 
         # ReduceLROnPlateau: reduce lr si val_fg_dice no mejora
         scheduler.step(val_dice)
@@ -615,16 +652,35 @@ def main() -> None:
             "args": vars(args),
         }
         # Se guarda siempre el último estado para poder reanudar/inspeccionar.
-        torch.save(checkpoint_last, os.path.join(args.save_dir, "last.pt"))
+        torch.save(checkpoint_last, os.path.join(run_dir, "last.pt"))
 
         # Persistencia incremental para no perder el histórico en cortes de energía.
         hist_df = pd.DataFrame(history)
         hist_df.to_csv(history_path, index=False)
 
     # 5) Resumen final y evaluación opcional en test.
+    final_result: Dict[str, float] = {}
+    if len(history) > 0:
+        final_result = {
+            "final_epoch": int(history[-1]["epoch"]),
+            "final_train_loss": float(history[-1]["train_loss"]),
+            "final_train_dice": float(history[-1]["train_dice"]),
+            "final_val_loss": float(history[-1]["val_loss"]),
+            "final_val_dice": float(history[-1]["val_dice"]),
+        }
+
     summary = {
-        "best_epoch": best_epoch,
-        "best_val_dice": best_val_dice,
+        "run_id": os.path.basename(run_dir),
+        "started_at_utc": started_at_utc,
+        "best_result": {
+            "best_epoch": best_epoch,
+            "best_val_dice": best_val_dice,
+        },
+        "full_training_result": {
+            "epochs_completed": len(history),
+            **final_result,
+        },
+        "hyperparameters": vars(args),
     }
 
     if args.eval_test:
@@ -643,7 +699,7 @@ def main() -> None:
             pin_memory=(device.type == "cuda"),
         )
 
-        best_ckpt_path = os.path.join(args.save_dir, "best.pt")
+        best_ckpt_path = os.path.join(run_dir, "best.pt")
         ckpt = torch.load(best_ckpt_path, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
 
@@ -657,12 +713,31 @@ def main() -> None:
         summary.update(test_metrics)
         print(f"Test | loss={test_metrics['test_loss']:.4f} dice={test_metrics['test_dice']:.4f}")
 
-    with open(os.path.join(args.save_dir, "summary.json"), "w", encoding="utf-8") as f:
+    summary["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+
+    summary_path = os.path.join(run_dir, "summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+
+    history_registry_path = os.path.join(args.save_dir, "training_runs_history.jsonl")
+    history_entry = {
+        "run_id": os.path.basename(run_dir),
+        "run_dir": run_dir,
+        "execution_date_utc": started_at_utc,
+        "best_result": summary["best_result"],
+        "full_training_result": summary["full_training_result"],
+        "hyperparameters": summary["hyperparameters"],
+        "summary_path": summary_path,
+        "history_path": history_path,
+        "best_checkpoint": os.path.join(run_dir, "best.pt"),
+        "last_checkpoint": os.path.join(run_dir, "last.pt"),
+    }
+    with open(history_registry_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(history_entry) + "\n")
 
     print("Training finished.")
     print(f"Best val dice: {best_val_dice:.4f} (epoch {best_epoch})")
-    print(f"Artifacts saved in: {args.save_dir}")
+    print(f"Artifacts saved in: {run_dir}")
 
 def train_model(config):
     set_seed(42)
