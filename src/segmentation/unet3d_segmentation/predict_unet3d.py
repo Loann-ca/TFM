@@ -55,6 +55,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for binary mask")
     parser.add_argument("--hu_min", type=float, default=-1000.0, help="HU window minimum")
     parser.add_argument("--hu_max", type=float, default=600.0, help="HU window maximum")
+    parser.add_argument(
+        "--windowing_mode",
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help=(
+            "Windowing mode: 'on' applies HU windowing, 'off' skips it, "
+            "'auto' skips when input looks already preprocessed ([0,1])."
+        ),
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Inference device")
 
@@ -173,13 +183,29 @@ def main() -> None:
     if ct.ndim != 3:
         raise ValueError(f"Expected 3D volume (H, W, D). Got shape: {ct.shape}")
 
-    ct = apply_windowing(ct, hu_min=args.hu_min, hu_max=args.hu_max)
+    ct_min = float(ct.min())
+    ct_max = float(ct.max())
+    looks_preprocessed = (ct_min >= -1e-3) and (ct_max <= 1.5)
+
+    if args.windowing_mode == "on":
+        ct = apply_windowing(ct, hu_min=args.hu_min, hu_max=args.hu_max)
+        windowing_used = True
+    elif args.windowing_mode == "off":
+        windowing_used = False
+    else:
+        if looks_preprocessed:
+            windowing_used = False
+            print("Input appears preprocessed ([0,1]); skipping HU windowing (auto mode).")
+        else:
+            ct = apply_windowing(ct, hu_min=args.hu_min, hu_max=args.hu_max)
+            windowing_used = True
 
     # Training uses (D, H, W) for model input, while files are stored as (H, W, D).
     ct_dhw = np.transpose(ct, (2, 0, 1)).astype(np.float32)
 
     print(f"Device: {device}")
     print(f"Checkpoint: {checkpoint_path}")
+    print(f"Windowing used: {windowing_used} | input min/max before windowing: {ct_min:.3f}/{ct_max:.3f}")
     print(f"Input shape: {ct.shape} (H,W,D) -> {ct_dhw.shape} (D,H,W)")
     print("Running sliding window inference with 64³ patches and 50% overlap...")
     
