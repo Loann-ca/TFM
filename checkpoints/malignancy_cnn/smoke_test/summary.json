@@ -1,0 +1,35 @@
+{
+  "run_id": "smoke_test",
+  "started_at_utc": "2026-06-30T10:55:40.023119+00:00",
+  "best_val_acc": 0.1276595744680851,
+  "train_nodules": 519,
+  "val_nodules": 141,
+  "class_counts_train": [
+    37,
+    164,
+    195,
+    106,
+    17
+  ],
+  "hyperparameters": {
+    "cmd": "train",
+    "output_dir": "output",
+    "save_dir": "checkpoints/malignancy_cnn",
+    "run_name": "smoke_test",
+    "train_mask_dir": null,
+    "val_mask_dir": null,
+    "test_mask_dir": null,
+    "epochs": 1,
+    "batch_size": 16,
+    "lr": 0.001,
+    "weight_decay": 1e-05,
+    "patch_size": 64,
+    "min_voxels": 20,
+    "base_channels": 32,
+    "num_workers": 0,
+    "seed": 42,
+    "device": "cpu",
+    "eval_test": false
+  },
+  "finished_at_utc": "2026-06-30T10:55:40.023621+00:00"
+}
