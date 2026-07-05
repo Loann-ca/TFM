@@ -45,7 +45,12 @@ def pad_dhw_to_multiple(volume_dhw: np.ndarray, multiple: int = 8) -> tuple[np.n
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inference for 3D U-Net lung nodule segmentation")
 
-    parser.add_argument("--input_ct", type=str, required=True, help="Path to input CT volume .npy (H, W, D) or a directory with .npy files")
+    parser.add_argument(
+        "--input_ct",
+        type=str,
+        default=os.path.join("output", "preprocessed", "test", "CT"),
+        help="Path to input CT volume .npy (H, W, D) or a directory with .npy files (default: output/preprocessed/test/CT)",
+    )
     parser.add_argument("--run_dir", type=str, required=True, help="Run directory containing best.pt")
     parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint path. Defaults to run_dir/best.pt")
 
@@ -232,6 +237,9 @@ def main() -> None:
     checkpoint_path = args.checkpoint or os.path.join(args.run_dir, "best.pt")
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    if not os.path.exists(args.input_ct):
+        raise FileNotFoundError(f"Input CT not found: {args.input_ct}")
 
     try:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)

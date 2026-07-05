@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from typing import List
 
+import csv
+
 import numpy as np
 
 
@@ -110,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--th_min", type=float, default=0.05, help="Minimum threshold to sweep")
     parser.add_argument("--th_max", type=float, default=0.95, help="Maximum threshold to sweep")
     parser.add_argument("--th_steps", type=int, default=19, help="Number of threshold values to test")
+    parser.add_argument("--csv_out", type=str, default=None, help="Optional path to save the full ranking as CSV")
     return parser.parse_args()
 
 
@@ -152,6 +155,35 @@ def main() -> None:
             f"{r.dice_at_05:.5f},{r.precision_at_best:.5f},{r.recall_at_best:.5f},"
             f"{r.pred_vox_at_best},{r.gt_vox}"
         )
+
+    if args.csv_out is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(args.csv_out)), exist_ok=True)
+        with open(args.csv_out, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "patient_id",
+                "source",
+                "best_dice",
+                "best_threshold",
+                "dice_at_0.5",
+                "precision_best",
+                "recall_best",
+                "pred_vox_best",
+                "gt_vox",
+            ])
+            for r in results:
+                writer.writerow([
+                    r.patient_id,
+                    "probs" if r.has_probs else "mask_only",
+                    f"{r.best_dice:.6f}",
+                    f"{r.best_threshold:.2f}",
+                    f"{r.dice_at_05:.6f}",
+                    f"{r.precision_at_best:.6f}",
+                    f"{r.recall_at_best:.6f}",
+                    r.pred_vox_at_best,
+                    r.gt_vox,
+                ])
+        print(f"Saved CSV ranking to: {args.csv_out}")
 
 
 if __name__ == "__main__":
