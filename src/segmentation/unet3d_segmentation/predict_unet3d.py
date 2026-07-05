@@ -31,6 +31,16 @@ def apply_windowing(ct: np.ndarray, hu_min: float, hu_max: float) -> np.ndarray:
     return ct.astype(np.float32)
 
 
+def pad_dhw_to_multiple(volume_dhw: np.ndarray, multiple: int = 8) -> tuple[np.ndarray, tuple[int, int, int]]:
+    """Pad (D, H, W) volume with zeros so each dim is divisible by `multiple`."""
+    d, h, w = volume_dhw.shape
+    pd = (multiple - (d % multiple)) % multiple
+    ph = (multiple - (h % multiple)) % multiple
+    pw = (multiple - (w % multiple)) % multiple
+    padded = np.pad(volume_dhw, ((0, pd), (0, ph), (0, pw)), mode="constant", constant_values=0.0)
+    return padded, (d, h, w)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inference for 3D U-Net lung nodule segmentation")
 
@@ -76,7 +86,10 @@ def main() -> None:
         patient_name = os.path.splitext(os.path.basename(args.input_ct))[0]
         args.output_mask = os.path.join("output", "predictions3d", f"{patient_name}.npy")
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    try:
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        ckpt = torch.load(checkpoint_path, map_location=device)
     ckpt_args = ckpt.get("args", {})
     base_channels = int(ckpt_args.get("base_channels", 16))
 
@@ -92,11 +105,16 @@ def main() -> None:
 
     # Training uses (D, H, W) for model input, while files are stored as (H, W, D).
     ct_dhw = np.transpose(ct, (2, 0, 1)).astype(np.float32)
+    ct_dhw_padded, original_dhw = pad_dhw_to_multiple(ct_dhw, multiple=8)
 
     with torch.no_grad():
-        x = torch.from_numpy(ct_dhw).unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, D, H, W]
+        x = torch.from_numpy(ct_dhw_padded).unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, D, H, W]
         logits = model(x)
         probs = torch.sigmoid(logits).squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)  # [D, H, W]
+
+    # Remove padding to recover the original volume shape.
+    d0, h0, w0 = original_dhw
+    probs = probs[:d0, :h0, :w0]
 
     prob_volume = np.transpose(probs, (1, 2, 0))  # Back to (H, W, D)
     mask = (prob_volume >= args.threshold).astype(np.uint8)
