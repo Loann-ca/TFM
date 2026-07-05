@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from typing import Iterable
 
 import numpy as np
 import torch
@@ -44,11 +45,12 @@ def pad_dhw_to_multiple(volume_dhw: np.ndarray, multiple: int = 8) -> tuple[np.n
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inference for 3D U-Net lung nodule segmentation")
 
-    parser.add_argument("--input_ct", type=str, required=True, help="Path to input CT volume .npy (H, W, D)")
+    parser.add_argument("--input_ct", type=str, required=True, help="Path to input CT volume .npy (H, W, D) or a directory with .npy files")
     parser.add_argument("--run_dir", type=str, required=True, help="Run directory containing best.pt")
     parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint path. Defaults to run_dir/best.pt")
 
     parser.add_argument("--output_mask", type=str, default=None, help="Output path for predicted mask .npy (default: output/predictions3d/<patient>.npy)")
+    parser.add_argument("--output_dir", type=str, default="output/predictions3d", help="Output directory used when --input_ct is a directory")
     parser.add_argument("--save_probs", action="store_true", help="Also save probability volume")
     parser.add_argument("--output_probs", type=str, default=None, help="Optional output path for probabilities .npy")
 
@@ -153,6 +155,76 @@ def sliding_window_inference(
     return probs
 
 
+def iter_input_ct_paths(input_ct: str) -> Iterable[str]:
+    if os.path.isdir(input_ct):
+        for name in sorted(os.listdir(input_ct)):
+            if name.lower().endswith(".npy"):
+                yield os.path.join(input_ct, name)
+    else:
+        yield input_ct
+
+
+def infer_case(
+    ct_path: str,
+    model: torch.nn.Module,
+    device: torch.device,
+    threshold: float,
+    hu_min: float,
+    hu_max: float,
+    windowing_mode: str,
+    save_probs: bool,
+    output_mask: str,
+    output_probs: str | None,
+) -> None:
+    ct = np.load(ct_path).astype(np.float32)
+    if ct.ndim != 3:
+        raise ValueError(f"Expected 3D volume (H, W, D). Got shape: {ct.shape}")
+
+    ct_min = float(ct.min())
+    ct_max = float(ct.max())
+    looks_preprocessed = (ct_min >= -1e-3) and (ct_max <= 1.5)
+
+    if windowing_mode == "on":
+        ct = apply_windowing(ct, hu_min=hu_min, hu_max=hu_max)
+        windowing_used = True
+    elif windowing_mode == "off":
+        windowing_used = False
+    else:
+        if looks_preprocessed:
+            windowing_used = False
+            print("Input appears preprocessed ([0,1]); skipping HU windowing (auto mode).")
+        else:
+            ct = apply_windowing(ct, hu_min=hu_min, hu_max=hu_max)
+            windowing_used = True
+
+    # Training uses (D, H, W) for model input, while files are stored as (H, W, D).
+    ct_dhw = np.transpose(ct, (2, 0, 1)).astype(np.float32)
+
+    print(f"Device: {device}")
+    print(f"Input: {ct_path}")
+    print(f"Windowing used: {windowing_used} | input min/max before windowing: {ct_min:.3f}/{ct_max:.3f}")
+    print(f"Input shape: {ct.shape} (H,W,D) -> {ct_dhw.shape} (D,H,W)")
+    print("Running sliding window inference with 64³ patches and 50% overlap...")
+
+    probs = sliding_window_inference(ct_dhw, model, device, patch_size=64, overlap=32)
+    prob_volume = np.transpose(probs, (1, 2, 0))  # Back to (H, W, D)
+    mask = (prob_volume >= threshold).astype(np.uint8)
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_mask)), exist_ok=True)
+    np.save(output_mask, mask)
+
+    if save_probs:
+        probs_path = output_probs
+        if probs_path is None:
+            base, _ = os.path.splitext(output_mask)
+            probs_path = f"{base}_probs.npy"
+        os.makedirs(os.path.dirname(os.path.abspath(probs_path)), exist_ok=True)
+        np.save(probs_path, prob_volume)
+        print(f"Saved probabilities: {probs_path}")
+
+    print(f"Saved mask: {output_mask}")
+
+
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
@@ -160,13 +232,6 @@ def main() -> None:
     checkpoint_path = args.checkpoint or os.path.join(args.run_dir, "best.pt")
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    if not os.path.exists(args.input_ct):
-        raise FileNotFoundError(f"Input CT not found: {args.input_ct}")
-
-    if args.output_mask is None:
-        patient_name = os.path.splitext(os.path.basename(args.input_ct))[0]
-        args.output_mask = os.path.join("output", "predictions3d", f"{patient_name}.npy")
 
     try:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -179,54 +244,53 @@ def main() -> None:
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    ct = np.load(args.input_ct).astype(np.float32)
-    if ct.ndim != 3:
-        raise ValueError(f"Expected 3D volume (H, W, D). Got shape: {ct.shape}")
+    input_paths = list(iter_input_ct_paths(args.input_ct))
+    if not input_paths:
+        raise FileNotFoundError(f"No .npy files found in: {args.input_ct}")
 
-    ct_min = float(ct.min())
-    ct_max = float(ct.max())
-    looks_preprocessed = (ct_min >= -1e-3) and (ct_max <= 1.5)
+    is_batch = os.path.isdir(args.input_ct)
+    if is_batch:
+        os.makedirs(args.output_dir, exist_ok=True)
+        print(f"Batch mode: found {len(input_paths)} CT files in {args.input_ct}")
+        print(f"Output directory: {args.output_dir}")
+        for ct_path in input_paths:
+            base_name = os.path.splitext(os.path.basename(ct_path))[0]
+            output_mask = os.path.join(args.output_dir, f"{base_name}.npy")
+            output_probs = os.path.join(args.output_dir, f"{base_name}_probs.npy") if args.save_probs else None
+            infer_case(
+                ct_path=ct_path,
+                model=model,
+                device=device,
+                threshold=args.threshold,
+                hu_min=args.hu_min,
+                hu_max=args.hu_max,
+                windowing_mode=args.windowing_mode,
+                save_probs=args.save_probs,
+                output_mask=output_mask,
+                output_probs=output_probs,
+            )
+        return
 
-    if args.windowing_mode == "on":
-        ct = apply_windowing(ct, hu_min=args.hu_min, hu_max=args.hu_max)
-        windowing_used = True
-    elif args.windowing_mode == "off":
-        windowing_used = False
-    else:
-        if looks_preprocessed:
-            windowing_used = False
-            print("Input appears preprocessed ([0,1]); skipping HU windowing (auto mode).")
-        else:
-            ct = apply_windowing(ct, hu_min=args.hu_min, hu_max=args.hu_max)
-            windowing_used = True
+    ct_path = input_paths[0]
+    if not os.path.exists(ct_path):
+        raise FileNotFoundError(f"Input CT not found: {ct_path}")
 
-    # Training uses (D, H, W) for model input, while files are stored as (H, W, D).
-    ct_dhw = np.transpose(ct, (2, 0, 1)).astype(np.float32)
+    if args.output_mask is None:
+        patient_name = os.path.splitext(os.path.basename(ct_path))[0]
+        args.output_mask = os.path.join(args.output_dir, f"{patient_name}.npy")
 
-    print(f"Device: {device}")
-    print(f"Checkpoint: {checkpoint_path}")
-    print(f"Windowing used: {windowing_used} | input min/max before windowing: {ct_min:.3f}/{ct_max:.3f}")
-    print(f"Input shape: {ct.shape} (H,W,D) -> {ct_dhw.shape} (D,H,W)")
-    print("Running sliding window inference with 64³ patches and 50% overlap...")
-    
-    probs = sliding_window_inference(ct_dhw, model, device, patch_size=64, overlap=32)
-
-    prob_volume = np.transpose(probs, (1, 2, 0))  # Back to (H, W, D)
-    mask = (prob_volume >= args.threshold).astype(np.uint8)
-
-    os.makedirs(os.path.dirname(os.path.abspath(args.output_mask)), exist_ok=True)
-    np.save(args.output_mask, mask)
-
-    if args.save_probs:
-        output_probs = args.output_probs
-        if output_probs is None:
-            base, _ = os.path.splitext(args.output_mask)
-            output_probs = f"{base}_probs.npy"
-        os.makedirs(os.path.dirname(os.path.abspath(output_probs)), exist_ok=True)
-        np.save(output_probs, prob_volume)
-        print(f"Saved probabilities: {output_probs}")
-
-    print(f"Saved mask: {args.output_mask}")
+    infer_case(
+        ct_path=ct_path,
+        model=model,
+        device=device,
+        threshold=args.threshold,
+        hu_min=args.hu_min,
+        hu_max=args.hu_max,
+        windowing_mode=args.windowing_mode,
+        save_probs=args.save_probs,
+        output_mask=args.output_mask,
+        output_probs=args.output_probs,
+    )
 
 
 if __name__ == "__main__":
