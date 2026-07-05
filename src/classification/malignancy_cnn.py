@@ -437,7 +437,7 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--train_mask_dir", type=str, default=None, help="Mask dir for train split (default: preprocessed/train/masks)")
     train.add_argument("--val_mask_dir", type=str, default=None, help="Mask dir for val split (default: preprocessed/val/masks)")
     train.add_argument("--test_mask_dir", type=str, default=None, help="Mask dir for test split (default: preprocessed/test/masks)")
-    train.add_argument("--epochs", type=int, default=40)
+    train.add_argument("--epochs", type=int, default=150)
     train.add_argument("--batch_size", type=int, default=32)
     train.add_argument("--lr", type=float, default=1e-3)
     train.add_argument("--weight_decay", type=float, default=1e-5)
@@ -448,6 +448,12 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     train.add_argument("--eval_test", action="store_true")
+    train.add_argument(
+    "--patience",
+    type=int,
+    default=25,
+    help="Early stopping patience"
+)
 
     pred = sub.add_parser("predict", help="Predict malignancy for detected nodules")
     pred.add_argument("--input_ct", type=str, required=True, help="Input CT .npy (H, W, D)")
@@ -519,8 +525,19 @@ def train_main(args: argparse.Namespace) -> None:
     model = SmallMalignancyCNN(in_channels=3, base_channels=args.base_channels, num_classes=5).to(device)
     criterion = nn.CrossEntropyLoss(weight=torch.from_numpy(class_weights).to(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",      # Queremos minimizar val_loss
+        factor=0.5,      # Reduce el LR a la mitad
+        patience=5,      # Espera 5 épocas sin mejorar
+        min_lr=1e-6,
+    )
+    best_val_loss = float("inf")
     best_val_acc = -1.0
+
+    epochs_without_improvement = 0
+    best_epoch = 0
+
     history: List[Dict[str, float]] = []
 
     print(f"Run directory: {run_dir}")
@@ -533,12 +550,14 @@ def train_main(args: argparse.Namespace) -> None:
         tr_loss, tr_acc = run_epoch(model, train_loader, optimizer, device, criterion)
         va_loss, va_acc = run_epoch(model, val_loader, None, device, criterion)
 
+        scheduler.step(va_loss)
         row = {
             "epoch": epoch,
             "train_loss": tr_loss,
             "train_acc": tr_acc,
             "val_loss": va_loss,
             "val_acc": va_acc,
+            "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(row)
         print(
@@ -554,22 +573,49 @@ def train_main(args: argparse.Namespace) -> None:
             "best_val_acc": best_val_acc,
             "class_weights": class_weights.tolist(),
             "args": vars(args),
+            "scheduler_state_dict": scheduler.state_dict(),
+
         }
         torch.save(last_ckpt, os.path.join(run_dir, "last.pt"))
 
-        if va_acc > best_val_acc:
+        if va_loss < best_val_loss:
+
+            best_val_loss = va_loss
             best_val_acc = va_acc
+            best_epoch = epoch
+
+            epochs_without_improvement = 0
+
             best_ckpt = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_val_acc": best_val_acc,
+                "best_val_loss": best_val_loss,
                 "class_weights": class_weights.tolist(),
                 "args": vars(args),
             }
+
             torch.save(best_ckpt, os.path.join(run_dir, "best.pt"))
 
+            print(f"✓ Validation loss improved ({best_val_loss:.4f})")
+
+        else:
+
+            epochs_without_improvement += 1
+
+            print(
+                f"No improvement "
+                f"({epochs_without_improvement}/{args.patience})"
+            )
+
         pd.DataFrame(history).to_csv(os.path.join(run_dir, "history.csv"), index=False)
+
+        if epochs_without_improvement >= args.patience:
+            print("\nEarly stopping triggered.")
+            print(f"Best epoch: {best_epoch}")
+            print(f"Best validation loss: {best_val_loss:.4f}")
+            break
 
     summary: Dict[str, object] = {
         "run_id": os.path.basename(run_dir),
@@ -579,6 +625,8 @@ def train_main(args: argparse.Namespace) -> None:
         "val_nodules": len(val_ds),
         "class_counts_train": class_counts.tolist(),
         "hyperparameters": vars(args),
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
     }
 
     if args.eval_test:
