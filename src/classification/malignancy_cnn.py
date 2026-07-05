@@ -25,6 +25,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from scipy import ndimage
+from sklearn.metrics import balanced_accuracy_score, f1_score
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -38,7 +39,7 @@ class NoduleSample:
     center: Tuple[int, int, int]
     bbox: Tuple[int, int, int, int, int, int]
     component_voxels: int
-    label_idx: int | None
+    label_value: float | None
     patient_id: str
 
 
@@ -96,7 +97,7 @@ def label_component(
     component_bbox: Tuple[int, int, int, int, int, int],
     meta_rows: Sequence[pd.Series],
     center_xyz: Tuple[int, int, int],
-) -> int | None:
+) -> float | None:
     if not meta_rows:
         return None
 
@@ -124,8 +125,7 @@ def label_component(
         return None
 
     malignancy = float(best_row["malignancy"])
-    cls = int(np.clip(np.rint(malignancy), 1, 5))
-    return cls - 1
+    return float(np.clip(malignancy, 1.0, 5.0))
 
 
 def extract_2p5d_patch(volume: np.ndarray, center: Tuple[int, int, int], patch_size: int) -> np.ndarray:
@@ -259,7 +259,7 @@ def load_split_samples(
                     center=(cx, cy, cz),
                     bbox=bbox,
                     component_voxels=voxels,
-                    label_idx=label_idx,
+                    label_value=label_idx,
                     patient_id=patient_id,
                 )
             )
@@ -297,14 +297,14 @@ class MalignancyNoduleDataset(Dataset):
         out: Dict[str, torch.Tensor] = {
             "image": torch.from_numpy(patch),
         }
-        if s.label_idx is not None:
-            out["label"] = torch.tensor(s.label_idx, dtype=torch.long)
+        if s.label_value is not None:
+            out["label"] = torch.tensor(s.label_value, dtype=torch.float32)
         out["center"] = torch.tensor(s.center, dtype=torch.int32)
         return out
 
 
 class SmallMalignancyCNN(nn.Module):
-    def __init__(self, in_channels: int = 3, base_channels: int = 32, num_classes: int = 5) -> None:
+    def __init__(self, in_channels: int = 3, base_channels: int = 32) -> None:
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(in_channels, base_channels, 3, padding=1, bias=False),
@@ -320,15 +320,15 @@ class SmallMalignancyCNN(nn.Module):
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
-        self.classifier = nn.Sequential(
+        self.regressor = nn.Sequential(
             nn.Flatten(),
             nn.Dropout(p=0.2),
-            nn.Linear(base_channels * 4, num_classes),
+            nn.Linear(base_channels * 4, 1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
-        return self.classifier(x)
+        return self.regressor(x).squeeze(1)
 
 
 def run_epoch(
@@ -337,36 +337,51 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
     criterion: nn.Module,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float, float, float]:
     train_mode = optimizer is not None
     model.train() if train_mode else model.eval()
 
     total_loss = 0.0
     total_correct = 0
     total = 0
+    total_abs_error = 0.0
+    all_preds: List[int] = []
+    all_targets: List[int] = []
 
     context = torch.enable_grad() if train_mode else torch.no_grad()
     with context:
         for batch in tqdm(loader, leave=False):
             x = batch["image"].to(device, non_blocking=True)
-            y = batch["label"].to(device, non_blocking=True)
+            y = batch["label"].to(device, non_blocking=True).float()
 
-            logits = model(x)
-            loss = criterion(logits, y)
+            preds = model(x)
+            loss = criterion(preds, y)
 
             if train_mode:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
 
-            preds = torch.argmax(logits, dim=1)
-            total_correct += int((preds == y).sum().item())
+            rounded_preds = torch.clamp(torch.round(preds), 1, 5)
+            rounded_y = torch.clamp(torch.round(y), 1, 5)
+            batch_correct = int((rounded_preds == rounded_y).sum().item())
+            total_correct += batch_correct
             total += int(y.numel())
             total_loss += float(loss.item()) * y.size(0)
+            total_abs_error += float(torch.abs(preds - y).sum().item())
+            all_preds.extend(rounded_preds.cpu().to(torch.int64).tolist())
+            all_targets.extend(rounded_y.cpu().to(torch.int64).tolist())
 
     mean_loss = total_loss / max(total, 1)
+    mae = float(total_abs_error / max(total, 1))
     acc = float(total_correct / max(total, 1))
-    return mean_loss, acc
+    if total > 0:
+        macro_f1 = float(f1_score(all_targets, all_preds, average="macro", labels=[1, 2, 3, 4, 5], zero_division=0))
+        balanced_acc = float(balanced_accuracy_score(all_targets, all_preds))
+    else:
+        macro_f1 = 0.0
+        balanced_acc = 0.0
+    return mean_loss, mae, acc, macro_f1, balanced_acc
 
 
 def infer_components(
@@ -390,9 +405,8 @@ def infer_components(
         for idx, (center, bbox, voxels) in enumerate(components, start=1):
             patch = extract_2p5d_patch(ct, center=center, patch_size=patch_size)
             x = torch.from_numpy(patch).unsqueeze(0).to(device)
-            logits = model(x)
-            probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
-            pred_idx = int(np.argmax(probs))
+            pred_score = float(model(x).item())
+            pred_round = int(np.clip(np.rint(pred_score), 1, 5))
 
             row: Dict[str, object] = {
                 "nodule_id": idx,
@@ -403,10 +417,9 @@ def infer_components(
                 "bbox_y": f"{bbox[2]}-{bbox[3]}",
                 "bbox_z": f"{bbox[4]}-{bbox[5]}",
                 "voxels": int(voxels),
-                "pred_malignancy": int(pred_idx + 1),
+                "pred_malignancy": pred_score,
+                "pred_malignancy_rounded": pred_round,
             }
-            for i, cls in enumerate(CLASS_NAMES):
-                row[f"prob_{cls}"] = float(probs[i])
             rows.append(row)
 
     return rows
@@ -517,13 +530,13 @@ def train_main(args: argparse.Namespace) -> None:
         pin_memory=(device.type == "cuda"),
     )
 
-    labels_np = np.array([int(s.label_idx) for s in train_samples], dtype=np.int64)
+    labels_np = np.array([int(np.rint(s.label_value)) for s in train_samples], dtype=np.int64)
     class_counts = np.bincount(labels_np, minlength=5)
     class_weights = np.where(class_counts > 0, class_counts.sum() / np.maximum(class_counts, 1), 0.0).astype(np.float32)
     class_weights = class_weights / np.maximum(class_weights.sum(), 1e-6) * len(class_weights)
 
-    model = SmallMalignancyCNN(in_channels=3, base_channels=args.base_channels, num_classes=5).to(device)
-    criterion = nn.CrossEntropyLoss(weight=torch.from_numpy(class_weights).to(device))
+    model = SmallMalignancyCNN(in_channels=3, base_channels=args.base_channels).to(device)
+    criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -532,8 +545,10 @@ def train_main(args: argparse.Namespace) -> None:
         patience=5,      # Espera 5 épocas sin mejorar
         min_lr=1e-6,
     )
-    best_val_loss = float("inf")
     best_val_acc = -1.0
+    best_val_macro_f1 = -1.0
+    best_val_balanced_acc = -1.0
+    best_val_loss = float("inf")
 
     epochs_without_improvement = 0
     best_epoch = 0
@@ -544,26 +559,32 @@ def train_main(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
     print(f"Train nodules: {len(train_ds)}")
     print(f"Val nodules: {len(val_ds)}")
-    print(f"Class counts train: {class_counts.tolist()}")
+    print(f"Rounded class counts train: {class_counts.tolist()}")
 
     for epoch in range(1, args.epochs + 1):
-        tr_loss, tr_acc = run_epoch(model, train_loader, optimizer, device, criterion)
-        va_loss, va_acc = run_epoch(model, val_loader, None, device, criterion)
+        tr_loss, tr_mae, tr_acc, tr_macro_f1, tr_balanced_acc = run_epoch(model, train_loader, optimizer, device, criterion)
+        va_loss, va_mae, va_acc, va_macro_f1, va_balanced_acc = run_epoch(model, val_loader, None, device, criterion)
 
         scheduler.step(va_loss)
         row = {
             "epoch": epoch,
             "train_loss": tr_loss,
-            "train_acc": tr_acc,
+            "train_mae": tr_mae,
+            "train_round_acc": tr_acc,
+            "train_macro_f1": tr_macro_f1,
+            "train_balanced_acc": tr_balanced_acc,
             "val_loss": va_loss,
-            "val_acc": va_acc,
+            "val_mae": va_mae,
+            "val_round_acc": va_acc,
+            "val_macro_f1": va_macro_f1,
+            "val_balanced_acc": va_balanced_acc,
             "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(row)
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
-            f"train_loss={tr_loss:.4f} train_acc={tr_acc:.4f} | "
-            f"val_loss={va_loss:.4f} val_acc={va_acc:.4f}"
+            f"train_loss={tr_loss:.4f} train_mae={tr_mae:.4f} train_round_acc={tr_acc:.4f} train_macro_f1={tr_macro_f1:.4f} train_balanced_acc={tr_balanced_acc:.4f} | "
+            f"val_loss={va_loss:.4f} val_mae={va_mae:.4f} val_round_acc={va_acc:.4f} val_macro_f1={va_macro_f1:.4f} val_balanced_acc={va_balanced_acc:.4f}"
         )
 
         last_ckpt = {
@@ -578,10 +599,17 @@ def train_main(args: argparse.Namespace) -> None:
         }
         torch.save(last_ckpt, os.path.join(run_dir, "last.pt"))
 
-        if va_loss < best_val_loss:
+        improved = (
+            va_macro_f1 > best_val_macro_f1
+            or (va_macro_f1 == best_val_macro_f1 and va_balanced_acc > best_val_balanced_acc)
+            or (va_macro_f1 == best_val_macro_f1 and va_balanced_acc == best_val_balanced_acc and va_loss < best_val_loss)
+        )
 
-            best_val_loss = va_loss
+        if improved:
             best_val_acc = va_acc
+            best_val_macro_f1 = va_macro_f1
+            best_val_balanced_acc = va_balanced_acc
+            best_val_loss = va_loss
             best_epoch = epoch
 
             epochs_without_improvement = 0
@@ -598,10 +626,9 @@ def train_main(args: argparse.Namespace) -> None:
 
             torch.save(best_ckpt, os.path.join(run_dir, "best.pt"))
 
-            print(f"✓ Validation loss improved ({best_val_loss:.4f})")
+            print(f"✓ Validation macro-F1 improved ({best_val_macro_f1:.4f})")
 
         else:
-
             epochs_without_improvement += 1
 
             print(
@@ -624,6 +651,8 @@ def train_main(args: argparse.Namespace) -> None:
         "train_nodules": len(train_ds),
         "val_nodules": len(val_ds),
         "class_counts_train": class_counts.tolist(),
+        "best_val_macro_f1": best_val_macro_f1,
+        "best_val_balanced_acc": best_val_balanced_acc,
         "hyperparameters": vars(args),
         "best_epoch": best_epoch,
         "best_val_loss": best_val_loss,
@@ -648,11 +677,14 @@ def train_main(args: argparse.Namespace) -> None:
 
         ckpt = torch.load(os.path.join(run_dir, "best.pt"), map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
-        te_loss, te_acc = run_epoch(model, test_loader, None, device, criterion)
+        te_loss, te_mae, te_acc, te_macro_f1, te_balanced_acc = run_epoch(model, test_loader, None, device, criterion)
         summary["test_loss"] = te_loss
-        summary["test_acc"] = te_acc
+        summary["test_mae"] = te_mae
+        summary["test_round_acc"] = te_acc
+        summary["test_macro_f1"] = te_macro_f1
+        summary["test_balanced_acc"] = te_balanced_acc
         summary["test_nodules"] = len(test_ds)
-        print(f"Test | loss={te_loss:.4f} acc={te_acc:.4f}")
+        print(f"Test | loss={te_loss:.4f} mae={te_mae:.4f} round_acc={te_acc:.4f} macro_f1={te_macro_f1:.4f} balanced_acc={te_balanced_acc:.4f}")
 
     summary["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
     with open(os.path.join(run_dir, "summary.json"), "w", encoding="utf-8") as f:
@@ -666,6 +698,8 @@ def train_main(args: argparse.Namespace) -> None:
                     "run_id": os.path.basename(run_dir),
                     "run_dir": run_dir,
                     "best_val_acc": best_val_acc,
+                    "best_val_macro_f1": best_val_macro_f1,
+                    "best_val_balanced_acc": best_val_balanced_acc,
                     "summary_path": os.path.join(run_dir, "summary.json"),
                     "history_path": os.path.join(run_dir, "history.csv"),
                     "best_checkpoint": os.path.join(run_dir, "best.pt"),
@@ -676,7 +710,7 @@ def train_main(args: argparse.Namespace) -> None:
         )
 
     print("Training finished.")
-    print(f"Best val acc: {best_val_acc:.4f}")
+    print(f"Best val macro-F1: {best_val_macro_f1:.4f}")
     print(f"Artifacts saved in: {run_dir}")
 
 
@@ -690,7 +724,7 @@ def predict_main(args: argparse.Namespace) -> None:
     base_channels = int(ckpt_args.get("base_channels", 32))
     patch_size = int(ckpt_args.get("patch_size", args.patch_size))
 
-    model = SmallMalignancyCNN(in_channels=3, base_channels=base_channels, num_classes=5).to(device)
+    model = SmallMalignancyCNN(in_channels=3, base_channels=base_channels).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
     if args.output_csv is None:
@@ -717,11 +751,7 @@ def predict_main(args: argparse.Namespace) -> None:
         "bbox_z",
         "voxels",
         "pred_malignancy",
-        "prob_1",
-        "prob_2",
-        "prob_3",
-        "prob_4",
-        "prob_5",
+        "pred_malignancy_rounded",
     ]
 
     with open(args.output_csv, "w", newline="", encoding="utf-8") as f:

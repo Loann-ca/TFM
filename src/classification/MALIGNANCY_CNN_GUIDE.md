@@ -4,15 +4,15 @@ Este documento explica como funciona [src/classification/malignancy_cnn.py](src/
 
 ## Objetivo
 
-La CNN clasifica cada nodulo detectado en una clase de malignidad de 1 a 5.
+La CNN estima una puntuacion continua de malignidad para cada nodulo detectado. La escala sigue siendo 1..5, pero el modelo ya no hace clasificacion dura en 5 clases.
 
 No clasifica el TAC completo entero como una sola etiqueta. Clasifica un nodule candidate por muestra.
 
 Por cada muestra:
 
 - Entrada de clasificacion: parche 2.5D centrado en un nodulo.
-- Salida: probabilidades para clases 1, 2, 3, 4 y 5.
-- Prediccion final: clase con mayor probabilidad (`argmax`).
+- Salida: puntuacion continua de malignidad.
+- Prediccion final: puntuacion continua, con redondeo opcional a una clase entera.
 
 ## Flujo General
 
@@ -23,7 +23,7 @@ Por cada muestra:
 3. Se detectan nodulos como componentes conectadas en 3D.
 4. De cada componente se obtiene centro, bounding box y volumen.
 5. Se extrae un parche 2.5D del CT en ese centro.
-6. La CNN predice malignidad 1..5 para ese nodulo.
+6. La CNN predice una puntuacion de malignidad para ese nodulo.
 
 En otras palabras:
 
@@ -56,7 +56,7 @@ Modelo: `SmallMalignancyCNN`
 - Bloques convolucionales 2D con BatchNorm + ReLU.
 - MaxPooling para reducir resolucion.
 - `AdaptiveAvgPool2d(1,1)` para compactar features.
-- Capa `Linear` final con 5 logits (clases 1..5).
+- Capa `Linear` final con 1 valor continuo.
 
 La CNN es ligera y rapida para iterar, y aprovecha contexto multi-plano sin coste de una 3D CNN completa.
 
@@ -72,7 +72,7 @@ Durante entrenamiento, las etiquetas salen de `metadata.csv` del split:
 
 - `malignancy` (valor continuo promedio de radiologos, tipicamente entre 1 y 5).
 - Se redondea al entero mas cercano y se limita a [1, 5].
-- Internamente se usa indice [0..4] para `CrossEntropyLoss`.
+- Internamente se usa la puntuacion continua como objetivo de regresion.
 
 Asignacion componente->anotacion:
 
@@ -88,7 +88,7 @@ Ejemplo:
 - se busca la mejor correspondencia entre ambos
 - una vez encontrado el match, se toma su valor `malignancy`
 
-Si la anotacion dice `malignancy = 3.25`, se redondea a clase 3.
+Si la anotacion dice `malignancy = 3.25`, ese valor se usa directamente como objetivo de entrenamiento.
 
 ## Que Son las Componentes Conectadas
 
@@ -121,7 +121,7 @@ python src/classification/malignancy_cnn.py train --output_dir output --epochs 4
 
 Artifacts del run (por defecto en `checkpoints/malignancy_cnn/run_...`):
 
-- `best.pt`: mejor checkpoint por `val_acc`.
+- `best.pt`: mejor checkpoint por `val_loss`.
 - `last.pt`: ultimo checkpoint.
 - `history.csv`: curvas por epoch.
 - `summary.json`: resumen de metricas e hiperparametros.
@@ -176,7 +176,8 @@ Columnas principales:
 - `bbox_x`, `bbox_y`, `bbox_z`
 - `voxels`
 - `pred_malignancy`
-- `prob_1..prob_5`
+- `pred_malignancy` (score continuo)
+- `pred_malignancy_rounded` (clase entera 1..5)
 
 ### Que input usa en inferencia
 
@@ -292,7 +293,7 @@ El CSV final tiene 3 filas.
 ## Consejos Practicos
 
 - Si usas mascaras de U-Net para entrenar, incrementa `--min_voxels` para reducir falsos positivos pequenos.
-- Compara dos runs: uno con GT y otro con U-Net masks para ver degradacion real de `val_acc`/`test_acc`.
+- Compara dos runs: uno con GT y otro con U-Net masks para ver degradacion real de `val_loss`/`test_round_acc`.
 - Revisa distribucion de clases en `summary.json` (`class_counts_train`) por posible desbalance.
 
 ### Regla practica recomendada
