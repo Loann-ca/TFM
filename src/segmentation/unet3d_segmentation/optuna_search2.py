@@ -5,16 +5,18 @@ import json
 
 
 def objective(trial):
-    lr = trial.suggest_categorical("lr", [1e-3, 3e-4])
-    base_channels = trial.suggest_categorical("base_channels", [16, 32])
-
+    #lr = trial.suggest_categorical("lr", [1e-3, 3e-4])
+    #base_channels = trial.suggest_categorical("base_channels", [16, 32])
+    lr = 3e-4
+    base_channels = 32
     batch_size = 4 if base_channels == 16 else 2
 
     save_dir = f"optuna/lr_{lr}_ch_{base_channels}"
 
+    train_script = r"D:\TFM\src\segmentation\unet3d_segmentation\train_unet3d_baseline.py"
     cmd = [
         "python",
-        "train_unet3d_baseline.py",
+        train_script,
         "--lr", str(lr),
         "--base_channels", str(base_channels),
         "--batch_size", str(batch_size),

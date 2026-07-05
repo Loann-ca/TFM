@@ -3,8 +3,10 @@
 /tcia-lidc-xml
 /dataset
 # Generated output
-/output/
-/checkpoints/
+/output/CT/
+/output/preprocessed/
+/output/masks/
+/output/optuna_3d/
 /optuna/
 # Python
 __pycache__/
