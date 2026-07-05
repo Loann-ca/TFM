@@ -71,6 +71,78 @@ def resolve_device(device_arg: str) -> torch.device:
     return torch.device("cpu")
 
 
+def sliding_window_inference(
+    volume_dhw: np.ndarray,
+    model: torch.nn.Module,
+    device: torch.device,
+    patch_size: int = 64,
+    overlap: int = 32,
+) -> np.ndarray:
+    """
+    Sliding window inference on a 3D volume using patches.
+    
+    Args:
+        volume_dhw: (D, H, W) volume
+        model: UNet3D model in eval mode
+        device: torch device
+        patch_size: Size of each patch (64x64x64)
+        overlap: Overlap between patches (32 = 50% overlap)
+    
+    Returns:
+        probs: (D, H, W) probability volume
+    """
+    d, h, w = volume_dhw.shape
+    stride = patch_size - overlap
+    
+    # Accumulate probabilities and counts for averaging overlaps
+    prob_accum = np.zeros((d, h, w), dtype=np.float32)
+    count_accum = np.zeros((d, h, w), dtype=np.float32)
+    
+    # Iterate over all patch positions
+    for start_d in range(0, d, stride):
+        end_d = min(start_d + patch_size, d)
+        if end_d - start_d < patch_size:
+            start_d = max(0, d - patch_size)
+            end_d = d
+        
+        for start_h in range(0, h, stride):
+            end_h = min(start_h + patch_size, h)
+            if end_h - start_h < patch_size:
+                start_h = max(0, h - patch_size)
+                end_h = h
+            
+            for start_w in range(0, w, stride):
+                end_w = min(start_w + patch_size, w)
+                if end_w - start_w < patch_size:
+                    start_w = max(0, w - patch_size)
+                    end_w = w
+                
+                # Extract patch
+                patch = volume_dhw[start_d:end_d, start_h:end_h, start_w:end_w]
+                
+                # Pad to patch_size if needed
+                pad_d = patch_size - (end_d - start_d)
+                pad_h = patch_size - (end_h - start_h)
+                pad_w = patch_size - (end_w - start_w)
+                if pad_d > 0 or pad_h > 0 or pad_w > 0:
+                    patch = np.pad(patch, ((0, pad_d), (0, pad_h), (0, pad_w)), mode="constant")
+                
+                # Inference on patch
+                with torch.no_grad():
+                    x = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(device)
+                    logits = model(x)
+                    patch_probs = torch.sigmoid(logits).squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)
+                
+                # Accumulate without padding
+                patch_probs = patch_probs[:end_d - start_d, :end_h - start_h, :end_w - start_w]
+                prob_accum[start_d:end_d, start_h:end_h, start_w:end_w] += patch_probs
+                count_accum[start_d:end_d, start_h:end_h, start_w:end_w] += 1.0
+    
+    # Average overlapping regions
+    probs = prob_accum / (count_accum + 1e-8)
+    return probs
+
+
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
@@ -105,16 +177,13 @@ def main() -> None:
 
     # Training uses (D, H, W) for model input, while files are stored as (H, W, D).
     ct_dhw = np.transpose(ct, (2, 0, 1)).astype(np.float32)
-    ct_dhw_padded, original_dhw = pad_dhw_to_multiple(ct_dhw, multiple=8)
 
-    with torch.no_grad():
-        x = torch.from_numpy(ct_dhw_padded).unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, D, H, W]
-        logits = model(x)
-        probs = torch.sigmoid(logits).squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)  # [D, H, W]
-
-    # Remove padding to recover the original volume shape.
-    d0, h0, w0 = original_dhw
-    probs = probs[:d0, :h0, :w0]
+    print(f"Device: {device}")
+    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Input shape: {ct.shape} (H,W,D) -> {ct_dhw.shape} (D,H,W)")
+    print("Running sliding window inference with 64³ patches and 50% overlap...")
+    
+    probs = sliding_window_inference(ct_dhw, model, device, patch_size=64, overlap=32)
 
     prob_volume = np.transpose(probs, (1, 2, 0))  # Back to (H, W, D)
     mask = (prob_volume >= args.threshold).astype(np.uint8)
@@ -131,9 +200,6 @@ def main() -> None:
         np.save(output_probs, prob_volume)
         print(f"Saved probabilities: {output_probs}")
 
-    print(f"Device: {device}")
-    print(f"Checkpoint: {checkpoint_path}")
-    print(f"Input shape: {ct.shape}")
     print(f"Saved mask: {args.output_mask}")
 
 
