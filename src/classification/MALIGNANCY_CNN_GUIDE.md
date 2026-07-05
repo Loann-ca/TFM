@@ -121,7 +121,7 @@ python src/classification/malignancy_cnn.py train --output_dir output --epochs 4
 
 Artifacts del run (por defecto en `checkpoints/malignancy_cnn/run_...`):
 
-- `best.pt`: mejor checkpoint por `val_loss`.
+- `best.pt`: mejor checkpoint por `val_macro_f1`.
 - `last.pt`: ultimo checkpoint.
 - `history.csv`: curvas por epoch.
 - `summary.json`: resumen de metricas e hiperparametros.
@@ -175,7 +175,6 @@ Columnas principales:
 - `center_x`, `center_y`, `center_z`
 - `bbox_x`, `bbox_y`, `bbox_z`
 - `voxels`
-- `pred_malignancy`
 - `pred_malignancy` (score continuo)
 - `pred_malignancy_rounded` (clase entera 1..5)
 
