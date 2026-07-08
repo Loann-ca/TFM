@@ -330,3 +330,169 @@ python src/classification/malignancy_cnn.py predict \
 - La CNN no ve el TAC entero, ve un parche centrado en ese nodulo.
 - La etiqueta de malignity sale de `metadata.csv`.
 - Puedes entrenar con GT o con mascaras de U-Net cambiando las rutas de mascara.
+
+---
+
+## Papers de Referencia
+
+Esta seccion resume los papers mas relevantes en clasificacion de malignidad de nodulos pulmonares con deep learning sobre LIDC-IDRI.
+
+### NoduleX — Causey et al. (2018)
+
+**Referencia:** Causey J.L. et al., *Highly accurate model for prediction of lung nodule malignancy with CT scans*, Scientific Reports, 2018.
+
+**Resultados:**
+- AUC: **0.9965** en LIDC-IDRI
+- Supera a radiólogos en discriminación benigno/maligno
+
+**Método clave:**
+- CNN profunda 2D sobre slices axiales del nódulo segmentado
+- Clasificación **binaria**: benigno (malignancy 1-2) vs maligno (malignancy 4-5), excluye malignancy 3
+- Entrenamiento sobre el recorte del nódulo, no sobre el TAC completo
+- Augmentación intensiva: flips, rotaciones, ruido
+
+---
+
+### DeepLung — Zhu et al. (2018)
+
+**Referencia:** Zhu W. et al., *DeepLung: Deep 3D Dual Path Nets for Automated Pulmonary Nodule Detection and Classification*, WACV, 2018.
+
+**Resultados:**
+- Accuracy: **~90.4%** en clasificación de malignidad (LIDC-IDRI)
+- AUC: **~0.95**
+
+**Método clave:**
+- 3D Dual Path Networks para el clasificador de malignidad
+- Usa parches 3D del nódulo (32×32×32)
+- Pipeline completo: detección 3D + clasificación 3D en un solo framework
+- GBM sobre las features extraídas por la CNN como paso final
+
+---
+
+### Revisión Sistemática — Wulaningsih et al. (2024)
+
+**Referencia:** Wulaningsih W. et al., *Deep Learning Models for Predicting Malignancy Risk in CT-detected Pulmonary Nodules*, Lung (Springer), 2024.
+
+**Conclusiones principales:**
+- Los mejores modelos DL alcanzan AUC > 0.95 de forma consistente en LIDC-IDRI
+- La clasificación **binaria** (benigno vs maligno, excluir ambiguos) es el protocolo estándar en la literatura
+- Excluir nódulos con malignancy = 3 mejora métricas porque son los casos genuinamente inciertos
+- Las CNNs 2D y 2.5D compiten bien con las 3D si el parche está bien centrado en el nódulo
+- El principal cuello de botella es el desbalance de clases (pocos nódulos muy malignos en LIDC-IDRI)
+
+---
+
+## Mejoras Implementadas Basadas en los Papers
+
+A continuación se documentan los cambios aplicados a `malignancy_cnn.py` para aproximar el sistema a las mejores prácticas de la literatura.
+
+### 1. Arquitectura más profunda con bloques residuales (`MalignancyCNN`)
+
+**Motivación:** La arquitectura original (`SmallMalignancyCNN`, 3 capas conv planas) tenía muy poca capacidad para capturar texturas complejas de nódulos. NoduleX y DeepLung usan redes con conexiones residuales.
+
+**Cambio:**
+- Nueva clase `ResBlock2D` (pre-activation residual block, He et al. 2016): dos conv 3×3 con skip connection, BatchNorm y Dropout2d.
+- Nueva clase `MalignancyCNN`: stem → 4 etapas residuales (c → 2c → 4c → 8c canales) → Global Average Pooling → head de 2 capas lineales con dropout.
+- `SmallMalignancyCNN` queda como alias para no romper checkpoints antiguos.
+
+**Parámetro:** `--base_channels` (default 32). Con 32, la red tiene ~32→64→128→256 canales en cada etapa.
+
+---
+
+### 2. Modo de clasificación binaria (`--task binary`)
+
+**Motivación:** NoduleX consigue AUC 0.9965 con clasificación binaria benigno/maligno. La escala 1-5 de malignancy es ruidosa (acuerdo bajo entre radiólogos) y una regresión MSE no la aprovecha bien.
+
+**Cambio:**
+- Nuevo argumento `--task` con opciones `regression` (por defecto, comportamiento anterior) y `binary`.
+- En modo `binary`:
+  - malignancy ≤ 2 → clase 0 (benigno)
+  - malignancy ≥ 4 → clase 1 (maligno)
+  - malignancy = 3 → **excluido** del dataset (ambiguo/incierto)
+- La función `remap_binary()` aplica este mapeo automáticamente a train, val y test.
+
+**Comando recomendado para comparar con papers:**
+
+```bash
+python src/classification/malignancy_cnn.py train \
+    --task binary \
+    --epochs 150 \
+    --batch_size 32 \
+    --eval_test
+```
+
+---
+
+### 3. Focal Loss para binario (`FocalBCELoss`)
+
+**Motivación:** En LIDC-IDRI los nódulos malignos (malignancy 4-5) son minoría. La BCE estándar aprende a predecir siempre benigno. La Focal Loss (Lin et al. 2017) reduce el peso de los ejemplos fáciles y fuerza al modelo a aprender los difíciles.
+
+**Cambio:**
+- Nueva clase `FocalBCELoss`: $\text{FL}(p_t) = (1 - p_t)^\gamma \cdot \text{BCE}$
+- Se calcula automáticamente `pos_weight = n_neg / n_pos` a partir del set de entrenamiento para compensar el desbalance.
+- Argumento `--focal_gamma` (default 2.0). Con 0 equivale a BCE estándar con pos_weight.
+
+---
+
+### 4. Class weights realmente aplicados (bug fix)
+
+**Motivación:** El código anterior calculaba `class_weights` a partir de la frecuencia inversa de cada clase, pero **nunca los conectaba a la función de pérdida**. Esto era un bug silencioso.
+
+**Cambio:**
+- En modo `regression`: se calculan pesos por muestra (`sample_weights`) proporcionales a la rareza de cada clase y se pasan al MSELoss de forma ponderada.
+- En modo `binary`: el desbalance se corrige directamente con `pos_weight` en `FocalBCELoss`.
+
+---
+
+### 5. Gradient clipping
+
+**Motivación:** Con redes más profundas (4 etapas residuales) los gradientes pueden explotar, especialmente en las primeras épocas.
+
+**Cambio:**
+- `nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)` aplicado en cada paso de optimización.
+
+---
+
+### 6. AUC como métrica principal en modo binario
+
+**Motivación:** Los papers reportan AUC como métrica estándar para comparación. La balanced accuracy sola no es suficiente para comparar con la literatura.
+
+**Cambio:**
+- `roc_auc_score` de scikit-learn calculado en cada epoch en modo `binary`.
+- El checkpoint `best.pt` se guarda cuando mejora el **AUC** (en modo binario) o la **balanced accuracy** (en modo regresión).
+- AUC se reporta en consola, en `history.csv` y en `summary.json`.
+
+---
+
+### 7. Augmentación de intensidad
+
+**Motivación:** Los nódulos pueden aparecer con distintas intensidades según el escáner y el protocolo de adquisición. Augmentar intensidad hace el modelo más robusto.
+
+**Cambio (solo en modo `augment=True`, es decir, entrenamiento):**
+- Jitter de brillo: desplazamiento aleatorio ±0.10 sobre valores normalizados [0,1]
+- Jitter de contraste: factor multiplicativo aleatorio en [0.9, 1.1]
+- Ruido gaussiano: σ=0.02, probabilidad 30%
+
+Los augmentos geométricos originales (flips, rot90) se mantienen.
+
+---
+
+### Tabla Resumen de Cambios
+
+| Cambio | Motivación (paper) | Argumento/Clase |
+|---|---|---|
+| Arquitectura residual 4 etapas | NoduleX, DeepLung | `MalignancyCNN`, `ResBlock2D` |
+| Modo clasificación binaria | NoduleX (AUC 0.9965) | `--task binary` |
+| Focal Loss + pos_weight automático | Desbalance de clases | `FocalBCELoss`, `--focal_gamma` |
+| Class weights conectados a la loss | Bug fix | automático |
+| Gradient clipping | Redes más profundas | `clip_grad_norm_` |
+| AUC como métrica principal | Estándar en la literatura | `roc_auc_score` en `run_epoch` |
+| Augmentación de intensidad | Variabilidad escáner | en `MalignancyNoduleDataset` |
+
+### Rendimiento esperado tras los cambios
+
+Con `--task binary` y la nueva arquitectura, el objetivo realista basado en la literatura es:
+
+- **AUC > 0.90** con 100-150 épocas y los datos de LIDC-IDRI completos
+- **AUC > 0.95** potencialmente alcanzable con ajuste de hiperparámetros y `--base_channels 48`
+- La balanced accuracy en binario debería superar 0.75 con clase bien balanceada por la Focal Loss
