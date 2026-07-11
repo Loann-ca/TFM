@@ -52,6 +52,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for binary mask")
     parser.add_argument("--hu_min", type=float, default=-1000.0, help="HU window minimum")
     parser.add_argument("--hu_max", type=float, default=600.0, help="HU window maximum")
+    parser.add_argument(
+        "--windowing_mode",
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help=(
+            "Windowing mode: 'on' applies HU windowing, 'off' skips it, "
+            "'auto' skips when input looks already preprocessed ([0,1])."
+        ),
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Inference device")
 
@@ -84,6 +94,7 @@ def infer_case(
     threshold: float,
     hu_min: float,
     hu_max: float,
+    windowing_mode: str,
     save_probs: bool,
     output_mask: str,
     output_probs: str | None,
@@ -92,10 +103,30 @@ def infer_case(
     if ct.ndim != 3:
         raise ValueError(f"Expected 3D volume (H, W, D). Got shape: {ct.shape}")
 
-    ct = apply_windowing(ct, hu_min=hu_min, hu_max=hu_max)
+    ct_min = float(ct.min())
+    ct_max = float(ct.max())
+    looks_preprocessed = (ct_min >= -1e-3) and (ct_max <= 1.5)
+
+    if windowing_mode == "on":
+        ct = apply_windowing(ct, hu_min=hu_min, hu_max=hu_max)
+        windowing_used = True
+    elif windowing_mode == "off":
+        windowing_used = False
+    else:
+        if looks_preprocessed:
+            windowing_used = False
+            print("Input appears preprocessed ([0,1]); skipping HU windowing (auto mode).")
+        else:
+            ct = apply_windowing(ct, hu_min=hu_min, hu_max=hu_max)
+            windowing_used = True
 
     h, w, d = ct.shape
     prob_volume = np.zeros((h, w, d), dtype=np.float32)
+
+    print(f"Device: {device}")
+    print(f"Input: {ct_path}")
+    print(f"Windowing used: {windowing_used} | input min/max before windowing: {ct_min:.3f}/{ct_max:.3f}")
+    print(f"Input shape: {ct.shape} (H,W,D)")
 
     with torch.no_grad():
         for z in range(d):
@@ -119,6 +150,8 @@ def infer_case(
         np.save(probs_path, prob_volume)
         print(f"Saved probabilities: {probs_path}")
 
+    print(f"Probabilities min/max: {float(prob_volume.min()):.6f}/{float(prob_volume.max()):.6f}")
+    print(f"Predicted voxels @ threshold {threshold:.2f}: {int(mask.sum())}")
     print(f"Input: {ct_path}")
     print(f"Saved mask: {output_mask}")
 
@@ -165,6 +198,7 @@ def main() -> None:
                 threshold=args.threshold,
                 hu_min=args.hu_min,
                 hu_max=args.hu_max,
+                windowing_mode=args.windowing_mode,
                 save_probs=args.save_probs,
                 output_mask=output_mask,
                 output_probs=output_probs,
@@ -186,6 +220,7 @@ def main() -> None:
         threshold=args.threshold,
         hu_min=args.hu_min,
         hu_max=args.hu_max,
+        windowing_mode=args.windowing_mode,
         save_probs=args.save_probs,
         output_mask=args.output_mask,
         output_probs=args.output_probs,
